@@ -1,5 +1,5 @@
 import type { PlcVariableKV } from "@tentacle/nats-schema";
-import { subscribeToKVUpdates } from "./client.ts";
+import { subscribeToVariableUpdates } from "./client.ts";
 
 export interface VariableFilter {
   variableIds?: string[];
@@ -10,21 +10,21 @@ export interface VariableFilter {
 
 export class WatcherManager {
   /**
-   * Start watching a project's KV bucket and return an async iterable
+   * Start watching a project's variable updates and return an async iterable
    * that yields filtered PlcVariableKV objects
    */
   async watch(
     projectId: string,
     filter?: VariableFilter,
   ): Promise<AsyncIterable<PlcVariableKV> & { close: () => Promise<void> }> {
-    const kvUpdates = await subscribeToKVUpdates(projectId);
+    const variableUpdates = await subscribeToVariableUpdates(projectId);
 
     let isActive = true;
 
     return {
       [Symbol.asyncIterator]: async function* () {
         try {
-          for await (const variable of kvUpdates) {
+          for await (const variable of variableUpdates) {
             if (!isActive) break;
 
             // Apply filters
@@ -58,7 +58,7 @@ export class WatcherManager {
             yield variable;
           }
         } catch (error) {
-          console.warn("KV watcher error:", error);
+          console.warn("Variable watcher error:", error);
         }
       },
 

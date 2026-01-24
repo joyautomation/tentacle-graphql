@@ -1,9 +1,35 @@
 import SchemaBuilder from "@pothos/core";
 import type { PlcVariableKV } from "@tentacle/nats-schema";
 
+// Device configuration type for EtherNet/IP PLCs
+export interface DeviceConfig {
+  id: string;
+  projectId: string;
+  host: string;
+  port: number;
+  type: "rockwell" | "generic-cip";
+  slot?: number;
+  scanRate: number;
+  enabled: boolean;
+}
+
+// Tag configuration type
+export interface TagConfig {
+  id: string;
+  deviceId: string;
+  address: string;
+  datatype?: string;
+  writable: boolean;
+  deadbandValue?: number;
+  deadbandMaxTime?: number;
+  disableRBE?: boolean;
+}
+
 export const builder = new SchemaBuilder<{
   Objects: {
     Variable: PlcVariableKV;
+    Device: DeviceConfig;
+    Tag: TagConfig;
   };
   Scalars: {
     JSON: { Input: unknown; Output: unknown };

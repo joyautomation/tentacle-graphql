@@ -40,7 +40,7 @@ export function getJetStreamClient(): JetStreamClient {
 }
 
 /**
- * List all available projects by discovering KV buckets
+ * List all available projects by discovering config KV buckets
  */
 export async function listProjects(): Promise<string[]> {
   const js = getJetStreamClient();
@@ -52,9 +52,9 @@ export async function listProjects(): Promise<string[]> {
     const streamsList = await jsm.streams.list().next();
     for (const streamInfo of streamsList) {
       const streamName = streamInfo.config.name;
-      // tentacle-plc uses $KV_ prefix (non-standard)
-      if (streamName?.startsWith("$KV_plc-variables-")) {
-        const projectId = streamName.replace("$KV_plc-variables-", "");
+      // Config KV buckets: KV_field-config-{projectId}
+      if (streamName?.startsWith("KV_field-config-")) {
+        const projectId = streamName.replace("KV_field-config-", "");
         projects.push(projectId);
       }
     }
@@ -90,98 +90,76 @@ function normalizeVariable(
 }
 
 /**
- * Get a specific variable from KV
+ * Get a specific variable using NATS request/reply
+ * Requests all variables and filters for the specific one
  */
 export async function getVariable(
   projectId: string,
   variableId: string,
 ): Promise<PlcVariableKV | null> {
   try {
-    const js = getJetStreamClient();
-    const jsm = await js.jetstreamManager();
-    const bucketName = `plc-variables-${projectId}`;
-    const streamName = `$KV_${bucketName}`;
-    const subjectPrefix = `$KV.${bucketName}`;
-
-    const subject = `${subjectPrefix}.${variableId}`;
-    const msg = await jsm.streams.getMessage(streamName, {
-      last_by_subj: subject,
-    });
-
-    if (msg && msg.data && msg.data.length > 0) {
-      const rawData = JSON.parse(new TextDecoder().decode(msg.data));
-      return normalizeVariable(rawData, projectId, variableId);
-    }
-    return null;
+    const variables = await listVariables(projectId);
+    return variables.find((v) => v.variableId === variableId) || null;
   } catch {
     return null;
   }
 }
 
 /**
- * List all variables in a project using subject filtering
+ * List all variables in a project using NATS request/reply
+ * Sends a request to tentacle-ethernetip which responds with current poll list
  */
 export async function listVariables(projectId: string): Promise<PlcVariableKV[]> {
   try {
-    const js = getJetStreamClient();
-    const jsm = await js.jetstreamManager();
-    const bucketName = `plc-variables-${projectId}`;
-    const streamName = `$KV_${bucketName}`;
-    const subjectPrefix = `$KV.${bucketName}`;
+    const nc = getNatsConnection();
+    const subject = `plc.variables.${projectId}`;
 
-    // Get stream info with subjects filter to find all keys efficiently
-    let streamInfo;
-    try {
-      streamInfo = await jsm.streams.info(streamName, {
-        subjects_filter: `${subjectPrefix}.>`,
-      });
-    } catch {
-      return []; // Project doesn't exist
+    // Request variables from the scanner service with 5 second timeout
+    const response = await nc.request(subject, new Uint8Array(0), { timeout: 5000 });
+
+    if (response.data && response.data.length > 0) {
+      const variables = JSON.parse(new TextDecoder().decode(response.data));
+      // Normalize the response to match PlcVariableKV schema
+      return variables.map((v: Record<string, unknown>) =>
+        normalizeVariable(v, projectId, v.variableId as string)
+      );
     }
 
-    // Get unique subjects from stream state
-    const subjects = streamInfo.state.subjects;
-    if (!subjects || Object.keys(subjects).length === 0) {
-      return [];
-    }
-
-    // Fetch last message for each subject in parallel
-    const fetchPromises = Object.keys(subjects).map(async (subject) => {
-      try {
-        const msg = await jsm.streams.getMessage(streamName, {
-          last_by_subj: subject,
-        });
-        if (msg && msg.data && msg.data.length > 0) {
-          const key = subject.replace(`${subjectPrefix}.`, "");
-          const rawData = JSON.parse(new TextDecoder().decode(msg.data));
-          return normalizeVariable(rawData, projectId, key);
-        }
-      } catch {
-        // Skip if message not found
-      }
-      return null;
-    });
-
-    const results = await Promise.all(fetchPromises);
-    return results.filter((v): v is PlcVariableKV => v !== null);
+    return [];
   } catch (error) {
-    log.warn(`Failed to list variables for project ${projectId}:`, error);
+    // Request timeout or no responders - scanner might not be running
+    log.debug(`No response for variables request on project ${projectId}:`, error);
     return [];
   }
 }
 
 /**
- * Subscribe to KV updates for a project using basic NATS subscription
+ * Delete variables matching a pattern - DEPRECATED
+ * Variables are now ephemeral (in-memory only in scanner).
+ * When a device is removed from config, the scanner automatically
+ * clears its cached values - no explicit cleanup needed.
  */
-export async function subscribeToKVUpdates(
+export async function deleteVariablesByPattern(
+  _projectId: string,
+  _pattern: string,
+): Promise<number> {
+  // No-op: Variables are ephemeral and auto-cleaned when device is removed from scanner config
+  return 0;
+}
+
+/**
+ * Subscribe to variable updates for a project using pub/sub
+ * Subscribes to plc.data.{projectId} for real-time streaming
+ * variableId is in the payload (not subject) because it contains dots (UDT paths)
+ */
+export async function subscribeToVariableUpdates(
   projectId: string,
 ): Promise<AsyncIterable<PlcVariableKV>> {
   const nc = getNatsConnection();
-  const bucketName = `plc-variables-${projectId}`;
-  const subjectPrefix = `$KV.${bucketName}`;
+  const subject = `plc.data.${projectId}`;
 
-  // Subscribe to all KV updates for this bucket
-  const sub = nc.subscribe(`${subjectPrefix}.>`);
+  // Subscribe to variable updates for this project
+  const sub = nc.subscribe(subject);
 
   return {
     [Symbol.asyncIterator]: async function* () {
@@ -190,17 +168,18 @@ export async function subscribeToKVUpdates(
           try {
             const data = msg.data;
             if (data && data.length > 0) {
-              const variableId = msg.subject.replace(`${subjectPrefix}.`, "");
               const rawData = JSON.parse(new TextDecoder().decode(data));
+              // variableId comes from payload, not subject
+              const variableId = rawData.variableId as string;
               const variable = normalizeVariable(rawData, projectId, variableId);
               yield variable;
             }
           } catch (error) {
-            log.warn("Error parsing variable from KV subscription:", error);
+            log.warn("Error parsing variable from subscription:", error);
           }
         }
       } catch (error) {
-        log.warn("Error in KV subscription:", error);
+        log.warn("Error in variable subscription:", error);
       } finally {
         sub.unsubscribe();
       }

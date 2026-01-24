@@ -1,5 +1,28 @@
 import { builder } from "./builder.ts";
 import { publishCommand, getVariable } from "../nats/client.ts";
+import {
+  upsertDevice,
+  deleteDevice,
+  upsertTag,
+  deleteTag,
+  setDeviceTags,
+} from "../nats/config.ts";
+import {
+  setMqttDefaults,
+  setMqttVariable,
+  enableMqttVariables,
+  disableMqttVariables,
+} from "../nats/mqtt.ts";
+import {
+  DeviceInputRef,
+  TagInputRef,
+  DeadBandInputRef,
+  MqttVariableConfigInputRef,
+  MqttVariableConfigRef,
+  MqttDefaultsRef,
+  type DeviceInputShape,
+  type TagInputShape,
+} from "./types.ts";
 
 builder.mutationType({
   fields: (t) => ({
@@ -11,7 +34,7 @@ builder.mutationType({
         variableId: t.arg.string({ required: true }),
         value: t.arg.string({ required: true }), // Accept as JSON string
       },
-      resolve: async (_root: unknown, args: { projectId: string; variableId: string; value: string }) => {
+      resolve: async (_root, args) => {
         // Parse the JSON value
         let parsedValue: unknown;
         try {
@@ -36,6 +59,149 @@ builder.mutationType({
         }
 
         return updated;
+      },
+    }),
+
+    // Create or update a device
+    upsertDevice: t.field({
+      type: "Device",
+      args: {
+        projectId: t.arg.string({ required: true }),
+        deviceId: t.arg.string({ required: true }),
+        input: t.arg({ type: DeviceInputRef, required: true }),
+      },
+      resolve: async (_root, args) => {
+        return await upsertDevice(args.projectId, args.deviceId, args.input);
+      },
+    }),
+
+    // Delete a device
+    deleteDevice: t.field({
+      type: "Boolean",
+      args: {
+        projectId: t.arg.string({ required: true }),
+        deviceId: t.arg.string({ required: true }),
+      },
+      resolve: async (_root, args) => {
+        return await deleteDevice(args.projectId, args.deviceId);
+      },
+    }),
+
+    // Create or update a tag
+    upsertTag: t.field({
+      type: "Tag",
+      args: {
+        projectId: t.arg.string({ required: true }),
+        deviceId: t.arg.string({ required: true }),
+        tagId: t.arg.string({ required: true }),
+        input: t.arg({ type: TagInputRef, required: true }),
+      },
+      resolve: async (_root, args) => {
+        return await upsertTag(args.projectId, args.deviceId, args.tagId, args.input);
+      },
+    }),
+
+    // Delete a tag
+    deleteTag: t.field({
+      type: "Boolean",
+      args: {
+        projectId: t.arg.string({ required: true }),
+        deviceId: t.arg.string({ required: true }),
+        tagId: t.arg.string({ required: true }),
+      },
+      resolve: async (_root, args) => {
+        return await deleteTag(args.projectId, args.deviceId, args.tagId);
+      },
+    }),
+
+    // Bulk set tags for a device (replaces all existing tags)
+    setDeviceTags: t.field({
+      type: ["String"],
+      args: {
+        projectId: t.arg.string({ required: true }),
+        deviceId: t.arg.string({ required: true }),
+        tags: t.arg.stringList({ required: true }),
+      },
+      resolve: async (_root, args) => {
+        return await setDeviceTags(args.projectId, args.deviceId, args.tags);
+      },
+    }),
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // MQTT Configuration Mutations
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // Set MQTT defaults (global deadband settings)
+    setMqttDefaults: t.field({
+      type: MqttDefaultsRef,
+      args: {
+        projectId: t.arg.string({ required: true }),
+        deadband: t.arg({ type: DeadBandInputRef, required: true }),
+      },
+      resolve: async (_root, args) => {
+        const deadband = {
+          value: args.deadband.value,
+          maxTime: args.deadband.maxTime ?? undefined,
+        };
+        return await setMqttDefaults(args.projectId, deadband);
+      },
+    }),
+
+    // Set config for a single MQTT variable (granular edit)
+    setMqttVariable: t.field({
+      type: MqttVariableConfigRef,
+      args: {
+        projectId: t.arg.string({ required: true }),
+        variableId: t.arg.string({ required: true }),
+        config: t.arg({ type: MqttVariableConfigInputRef, required: true }),
+      },
+      resolve: async (_root, args) => {
+        const config = {
+          enabled: args.config.enabled,
+          deadband: args.config.deadband
+            ? {
+                value: args.config.deadband.value,
+                maxTime: args.config.deadband.maxTime ?? undefined,
+              }
+            : undefined,
+        };
+        return await setMqttVariable(args.projectId, args.variableId, config);
+      },
+    }),
+
+    // Bulk enable variables for MQTT
+    enableMqttVariables: t.field({
+      type: ["String"],
+      args: {
+        projectId: t.arg.string({ required: true }),
+        variableIds: t.arg.stringList({ required: true }),
+        config: t.arg({ type: MqttVariableConfigInputRef, required: false }),
+      },
+      resolve: async (_root, args) => {
+        const config = args.config
+          ? {
+              enabled: args.config.enabled,
+              deadband: args.config.deadband
+                ? {
+                    value: args.config.deadband.value,
+                    maxTime: args.config.deadband.maxTime ?? undefined,
+                  }
+                : undefined,
+            }
+          : undefined;
+        return await enableMqttVariables(args.projectId, args.variableIds, config);
+      },
+    }),
+
+    // Bulk disable variables for MQTT
+    disableMqttVariables: t.field({
+      type: ["String"],
+      args: {
+        projectId: t.arg.string({ required: true }),
+        variableIds: t.arg.stringList({ required: true }),
+      },
+      resolve: async (_root, args) => {
+        return await disableMqttVariables(args.projectId, args.variableIds);
       },
     }),
   }),

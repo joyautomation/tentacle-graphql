@@ -12,6 +12,7 @@
     "jsr:@std/io@0.225.2": "0.225.2",
     "npm:@pothos/core@^3.41.0": "3.41.2_graphql@16.11.0",
     "npm:graphql-yoga@^5.1.1": "5.13.5_graphql@16.11.0",
+    "npm:graphql@^16.8.1": "16.11.0",
     "npm:tweetnacl@1.0.3": "1.0.3"
   },
   "jsr": {

@@ -79,7 +79,7 @@ function normalizeVariable(
   return {
     projectId: (data.projectId as string) || projectId,
     variableId: (data.variableId as string) || variableId,
-    value: (data.value ?? data) as string | number | boolean | Record<string, unknown>,
+    value: "value" in data ? (data.value as string | number | boolean | Record<string, unknown> | null) : null,
     datatype: (data.datatype as PlcVariableKV["datatype"]) || "unknown",
     lastUpdated: (data.lastUpdated as number) || Date.now(),
     source: (data.source as PlcVariableKV["source"]) || "plc",

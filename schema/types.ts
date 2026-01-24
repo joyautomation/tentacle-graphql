@@ -19,6 +19,7 @@ builder.objectType("Variable", {
     variableId: t.exposeString("variableId"),
     value: t.field({
       type: "JSON",
+      nullable: true,
       resolve: (v) => v.value,
     }),
     datatype: t.exposeString("datatype"),

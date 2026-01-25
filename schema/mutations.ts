@@ -1,5 +1,5 @@
 import { builder } from "./builder.ts";
-import { publishCommand, getVariable, browseTags, subscribeTags, unsubscribeTags } from "../nats/client.ts";
+import { publishCommand, getVariable, browseTags, subscribeTags, unsubscribeTags, deleteProject } from "../nats/client.ts";
 import {
   upsertDevice,
   deleteDevice,
@@ -247,6 +247,21 @@ builder.mutationType({
       resolve: async (_root, args) => {
         const result = await unsubscribeTags(args.projectId, args.tags, args.subscriberId);
         return result.success;
+      },
+    }),
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Project Management
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // Delete a project and all its associated data (config, cache, mqtt config)
+    deleteProject: t.field({
+      type: "Boolean",
+      args: {
+        projectId: t.arg.string({ required: true }),
+      },
+      resolve: async (_root, args) => {
+        return await deleteProject(args.projectId);
       },
     }),
   }),

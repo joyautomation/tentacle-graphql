@@ -1,6 +1,14 @@
 import SchemaBuilder from "@pothos/core";
 import type { PlcVariableKV } from "@tentacle/nats-schema";
 
+// Project info type (must match ProjectInfo from nats/client.ts)
+export interface ProjectConfig {
+  id: string;
+  lastActivity: number | null;
+  isConnected: boolean;
+  variableCount: number;
+}
+
 // Device configuration type for EtherNet/IP PLCs
 export interface DeviceConfig {
   id: string;
@@ -27,6 +35,7 @@ export interface TagConfig {
 
 export const builder = new SchemaBuilder<{
   Objects: {
+    Project: ProjectConfig;
     Variable: PlcVariableKV;
     Device: DeviceConfig;
     Tag: TagConfig;

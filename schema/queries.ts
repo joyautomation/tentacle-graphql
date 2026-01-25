@@ -1,6 +1,6 @@
 import { builder } from "./builder.ts";
 import {
-  listProjects,
+  getProjectsWithInfo,
   listVariables,
   getVariable,
 } from "../nats/client.ts";
@@ -14,10 +14,11 @@ import { MqttProjectConfigRef } from "./types.ts";
 
 builder.queryType({
   fields: (t) => ({
-    // List all available projects
-    projects: t.stringList({
+    // List all available projects with activity info
+    projects: t.field({
+      type: ["Project"],
       resolve: async () => {
-        return await listProjects();
+        return await getProjectsWithInfo();
       },
     }),
 

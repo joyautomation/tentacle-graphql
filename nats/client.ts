@@ -40,6 +40,19 @@ export function getJetStreamClient(): JetStreamClient {
 }
 
 /**
+ * Project info with activity tracking
+ */
+export type ProjectInfo = {
+  id: string;
+  lastActivity: number | null;  // timestamp of most recent variable update
+  isConnected: boolean;         // whether the scanner service is responding
+  variableCount: number;        // number of cached variables
+};
+
+// Stale threshold: 5 minutes without activity
+const STALE_THRESHOLD_MS = 5 * 60 * 1000;
+
+/**
  * List all available projects by discovering config KV buckets
  */
 export async function listProjects(): Promise<string[]> {
@@ -63,6 +76,103 @@ export async function listProjects(): Promise<string[]> {
   }
 
   return projects;
+}
+
+/**
+ * Get detailed info for all projects including activity status
+ */
+export async function getProjectsWithInfo(): Promise<ProjectInfo[]> {
+  const projectIds = await listProjects();
+  const projectInfos: ProjectInfo[] = [];
+
+  for (const id of projectIds) {
+    const info = await getProjectInfo(id);
+    projectInfos.push(info);
+  }
+
+  return projectInfos;
+}
+
+/**
+ * Get detailed info for a single project
+ */
+export async function getProjectInfo(projectId: string): Promise<ProjectInfo> {
+  let isConnected = false;
+  let lastActivity: number | null = null;
+  let variableCount = 0;
+
+  try {
+    const nc = getNatsConnection();
+    const subject = `plc.variables.${projectId}`;
+
+    // Try to get variables with a short timeout
+    const response = await nc.request(subject, new Uint8Array(0), { timeout: 2000 });
+
+    if (response.data && response.data.length > 0) {
+      isConnected = true;
+      const variables = JSON.parse(new TextDecoder().decode(response.data));
+      variableCount = variables.length;
+
+      // Find the most recent lastUpdated timestamp
+      for (const v of variables) {
+        const updated = v.lastUpdated as number | undefined;
+        if (updated && (lastActivity === null || updated > lastActivity)) {
+          lastActivity = updated;
+        }
+      }
+    } else {
+      isConnected = true; // Service responded, just no variables
+    }
+  } catch {
+    // Request timeout or no responders - scanner might not be running
+    isConnected = false;
+  }
+
+  return {
+    id: projectId,
+    lastActivity,
+    isConnected,
+    variableCount,
+  };
+}
+
+/**
+ * Check if a project is stale (no activity for STALE_THRESHOLD_MS)
+ */
+export function isProjectStale(info: ProjectInfo): boolean {
+  if (!info.isConnected) return true;
+  if (info.lastActivity === null) return true;
+  return Date.now() - info.lastActivity > STALE_THRESHOLD_MS;
+}
+
+/**
+ * Delete a project and all its associated data (KV buckets)
+ */
+export async function deleteProject(projectId: string): Promise<boolean> {
+  const js = getJetStreamClient();
+  const jsm = await js.jetstreamManager();
+
+  const bucketsToDelete = [
+    `field-config-${projectId}`,
+    `plc-cache-${projectId}`,
+    `mqtt-config-${projectId}`,
+  ];
+
+  let deletedAny = false;
+
+  for (const bucket of bucketsToDelete) {
+    const streamName = `KV_${bucket}`;
+    try {
+      await jsm.streams.delete(streamName);
+      log.info(`Deleted stream: ${streamName}`);
+      deletedAny = true;
+    } catch {
+      // Stream doesn't exist or already deleted
+      log.debug(`Stream not found or already deleted: ${streamName}`);
+    }
+  }
+
+  return deletedAny;
 }
 
 /**

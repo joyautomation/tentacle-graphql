@@ -1,5 +1,29 @@
 import { builder } from "./builder.ts";
 import type { PlcVariableKV, DeadBandConfig } from "@tentacle/nats-schema";
+import type { ProjectInfo } from "../nats/client.ts";
+
+// Project object type with activity tracking
+builder.objectType("Project", {
+  fields: (t) => ({
+    id: t.exposeString("id"),
+    lastActivity: t.field({
+      type: "DateTime",
+      nullable: true,
+      resolve: (p: ProjectInfo) => p.lastActivity ? new Date(p.lastActivity) : null,
+    }),
+    isConnected: t.exposeBoolean("isConnected"),
+    variableCount: t.exposeInt("variableCount"),
+    isStale: t.field({
+      type: "Boolean",
+      resolve: (p: ProjectInfo) => {
+        if (!p.isConnected) return true;
+        if (p.lastActivity === null) return true;
+        // Stale if no activity for 5 minutes
+        return Date.now() - p.lastActivity > 5 * 60 * 1000;
+      },
+    }),
+  }),
+});
 
 // DeadBandConfig object type
 const DeadBandConfigType = builder.objectRef<DeadBandConfig>(

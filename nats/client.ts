@@ -79,7 +79,7 @@ function normalizeVariable(
   return {
     projectId: (data.projectId as string) || projectId,
     variableId: (data.variableId as string) || variableId,
-    value: "value" in data ? (data.value as string | number | boolean | Record<string, unknown> | null) : null,
+    value: "value" in data && data.value !== null ? (data.value as string | number | boolean | Record<string, unknown>) : 0,
     datatype: (data.datatype as PlcVariableKV["datatype"]) || "unknown",
     lastUpdated: (data.lastUpdated as number) || Date.now(),
     source: (data.source as PlcVariableKV["source"]) || "plc",
@@ -201,6 +201,104 @@ export async function publishCommand(
 
   nc.publish(subject, payload);
   log.debug(`Published command to ${subject}:`, value);
+}
+
+/**
+ * Trigger a browse operation on PLC(s) to discover available tags
+ * Returns the list of discovered variables (fills cache for future queries)
+ */
+export async function browseTags(
+  projectId: string,
+  plcId?: string,
+): Promise<PlcVariableKV[]> {
+  try {
+    const nc = getNatsConnection();
+    const subject = `plc.browse.${projectId}`;
+
+    // Build request payload
+    const requestData = plcId ? JSON.stringify({ plcId }) : new Uint8Array(0);
+
+    // Browse can take a while (UDT expansion), use longer timeout
+    log.info(`Requesting browse for project ${projectId}${plcId ? ` (PLC: ${plcId})` : ""}`);
+    const response = await nc.request(
+      subject,
+      typeof requestData === "string" ? new TextEncoder().encode(requestData) : requestData,
+      { timeout: 60000 }, // 60 second timeout for browse
+    );
+
+    if (response.data && response.data.length > 0) {
+      const variables = JSON.parse(new TextDecoder().decode(response.data));
+      log.info(`Browse complete: ${variables.length} tags discovered`);
+      return variables.map((v: Record<string, unknown>) =>
+        normalizeVariable(v, projectId, v.variableId as string)
+      );
+    }
+
+    return [];
+  } catch (error) {
+    log.error(`Browse request failed for project ${projectId}:`, error);
+    throw new Error(`Browse failed: ${error}`);
+  }
+}
+
+/**
+ * Subscribe tags to be polled by the scanner
+ */
+export async function subscribeTags(
+  projectId: string,
+  tags: string[],
+  subscriberId: string,
+): Promise<{ success: boolean; count: number }> {
+  try {
+    const nc = getNatsConnection();
+    const subject = `plc.subscribe.${projectId}`;
+    const payload = JSON.stringify({ tags, subscriberId });
+
+    const response = await nc.request(
+      subject,
+      new TextEncoder().encode(payload),
+      { timeout: 5000 },
+    );
+
+    if (response.data && response.data.length > 0) {
+      return JSON.parse(new TextDecoder().decode(response.data));
+    }
+
+    return { success: false, count: 0 };
+  } catch (error) {
+    log.error(`Subscribe request failed:`, error);
+    throw new Error(`Subscribe failed: ${error}`);
+  }
+}
+
+/**
+ * Unsubscribe tags from polling
+ */
+export async function unsubscribeTags(
+  projectId: string,
+  tags: string[],
+  subscriberId: string,
+): Promise<{ success: boolean; count: number }> {
+  try {
+    const nc = getNatsConnection();
+    const subject = `plc.unsubscribe.${projectId}`;
+    const payload = JSON.stringify({ tags, subscriberId });
+
+    const response = await nc.request(
+      subject,
+      new TextEncoder().encode(payload),
+      { timeout: 5000 },
+    );
+
+    if (response.data && response.data.length > 0) {
+      return JSON.parse(new TextDecoder().decode(response.data));
+    }
+
+    return { success: false, count: 0 };
+  } catch (error) {
+    log.error(`Unsubscribe request failed:`, error);
+    throw new Error(`Unsubscribe failed: ${error}`);
+  }
 }
 
 /**

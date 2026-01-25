@@ -1,5 +1,5 @@
 import { builder } from "./builder.ts";
-import { publishCommand, getVariable } from "../nats/client.ts";
+import { publishCommand, getVariable, browseTags, subscribeTags, unsubscribeTags } from "../nats/client.ts";
 import {
   upsertDevice,
   deleteDevice,
@@ -202,6 +202,51 @@ builder.mutationType({
       },
       resolve: async (_root, args) => {
         return await disableMqttVariables(args.projectId, args.variableIds);
+      },
+    }),
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Scanner Control Mutations
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // Trigger a browse operation to discover available PLC tags
+    browseTags: t.field({
+      type: ["Variable"],
+      args: {
+        projectId: t.arg.string({ required: true }),
+        plcId: t.arg.string({ required: false }), // Optional: browse specific PLC
+      },
+      resolve: async (_root, args) => {
+        const variables = await browseTags(args.projectId, args.plcId ?? undefined);
+        return variables;
+      },
+    }),
+
+    // Subscribe tags to be polled by the scanner
+    subscribeToTags: t.field({
+      type: "Boolean",
+      args: {
+        projectId: t.arg.string({ required: true }),
+        tags: t.arg.stringList({ required: true }),
+        subscriberId: t.arg.string({ required: true }),
+      },
+      resolve: async (_root, args) => {
+        const result = await subscribeTags(args.projectId, args.tags, args.subscriberId);
+        return result.success;
+      },
+    }),
+
+    // Unsubscribe tags from polling
+    unsubscribeFromTags: t.field({
+      type: "Boolean",
+      args: {
+        projectId: t.arg.string({ required: true }),
+        tags: t.arg.stringList({ required: true }),
+        subscriberId: t.arg.string({ required: true }),
+      },
+      resolve: async (_root, args) => {
+        const result = await unsubscribeTags(args.projectId, args.tags, args.subscriberId);
+        return result.success;
       },
     }),
   }),

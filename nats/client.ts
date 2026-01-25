@@ -1,13 +1,15 @@
 import { connect, type NatsConnection } from "@nats-io/transport-deno";
 import { jetstream, type JetStreamClient } from "@nats-io/jetstream";
+import { Kvm, type KV } from "@nats-io/kv";
 import { createLogger, LogLevel } from "@joyautomation/coral";
-import type { PlcVariableKV } from "@tentacle/nats-schema";
+import type { PlcVariableKV, ServiceHeartbeat, TentacleServiceType } from "@tentacle/nats-schema";
 import type { NatsConfig } from "../types/config.ts";
 
 const log = createLogger("graphql-nats", LogLevel.info);
 
 let connection: NatsConnection | null = null;
 let jsClient: JetStreamClient | null = null;
+let heartbeatsKv: KV | null = null;
 
 export async function connectToNats(config: NatsConfig): Promise<void> {
   if (connection) {
@@ -22,6 +24,14 @@ export async function connectToNats(config: NatsConfig): Promise<void> {
   });
 
   jsClient = jetstream(connection);
+
+  // Initialize heartbeats KV bucket (or create if doesn't exist)
+  const kvm = new Kvm(jsClient);
+  heartbeatsKv = await kvm.create("service_heartbeats", {
+    history: 1,
+    ttl: 60 * 1000, // 1 minute TTL
+  });
+
   log.info(`Connected to NATS at ${config.servers}`);
 }
 
@@ -45,12 +55,78 @@ export function getJetStreamClient(): JetStreamClient {
 export type ProjectInfo = {
   id: string;
   lastActivity: number | null;  // timestamp of most recent variable update
-  isConnected: boolean;         // whether the scanner service is responding
+  isConnected: boolean;         // whether any tentacle service is alive for this project
   variableCount: number;        // number of cached variables
+  services: ServiceHeartbeat[]; // active services for this project
 };
 
-// Stale threshold: 5 minutes without activity
-const STALE_THRESHOLD_MS = 5 * 60 * 1000;
+/**
+ * Get all heartbeats for a specific project
+ */
+export async function getProjectHeartbeats(projectId: string): Promise<ServiceHeartbeat[]> {
+  if (!heartbeatsKv) {
+    return [];
+  }
+
+  const heartbeats: ServiceHeartbeat[] = [];
+  const decoder = new TextDecoder();
+
+  try {
+    // Keys are formatted as: {serviceType}.{instanceId}.{projectId}
+    // We need to iterate all keys and filter by projectId
+    const keys = await heartbeatsKv.keys();
+    for await (const key of keys) {
+      // Check if this key ends with our projectId
+      if (key.endsWith(`.${projectId}`)) {
+        try {
+          const entry = await heartbeatsKv.get(key);
+          if (entry?.value) {
+            const heartbeat = JSON.parse(decoder.decode(entry.value)) as ServiceHeartbeat;
+            heartbeats.push(heartbeat);
+          }
+        } catch {
+          // Entry may have expired or failed to parse
+        }
+      }
+    }
+  } catch {
+    // KV bucket may not exist yet
+  }
+
+  return heartbeats;
+}
+
+/**
+ * Get all heartbeats across all projects
+ */
+export async function getAllHeartbeats(): Promise<ServiceHeartbeat[]> {
+  if (!heartbeatsKv) {
+    return [];
+  }
+
+  const heartbeats: ServiceHeartbeat[] = [];
+  const decoder = new TextDecoder();
+
+  try {
+    const keys = await heartbeatsKv.keys();
+    for await (const key of keys) {
+      try {
+        const entry = await heartbeatsKv.get(key);
+        if (entry?.value) {
+          const heartbeat = JSON.parse(decoder.decode(entry.value)) as ServiceHeartbeat;
+          heartbeats.push(heartbeat);
+        }
+      } catch {
+        // Entry may have expired or failed to parse
+      }
+    }
+  } catch {
+    // KV bucket may not exist yet
+  }
+
+  return heartbeats;
+}
+
 
 /**
  * List all available projects by discovering config KV buckets
@@ -97,10 +173,14 @@ export async function getProjectsWithInfo(): Promise<ProjectInfo[]> {
  * Get detailed info for a single project
  */
 export async function getProjectInfo(projectId: string): Promise<ProjectInfo> {
-  let isConnected = false;
   let lastActivity: number | null = null;
   let variableCount = 0;
 
+  // Get heartbeats for this project - determines if any service is connected
+  const services = await getProjectHeartbeats(projectId);
+  const isConnected = services.length > 0;
+
+  // Try to get variable info from the scanner service
   try {
     const nc = getNatsConnection();
     const subject = `plc.variables.${projectId}`;
@@ -109,7 +189,6 @@ export async function getProjectInfo(projectId: string): Promise<ProjectInfo> {
     const response = await nc.request(subject, new Uint8Array(0), { timeout: 2000 });
 
     if (response.data && response.data.length > 0) {
-      isConnected = true;
       const variables = JSON.parse(new TextDecoder().decode(response.data));
       variableCount = variables.length;
 
@@ -120,12 +199,10 @@ export async function getProjectInfo(projectId: string): Promise<ProjectInfo> {
           lastActivity = updated;
         }
       }
-    } else {
-      isConnected = true; // Service responded, just no variables
     }
   } catch {
     // Request timeout or no responders - scanner might not be running
-    isConnected = false;
+    // This is OK - isConnected is based on heartbeats now
   }
 
   return {
@@ -133,6 +210,7 @@ export async function getProjectInfo(projectId: string): Promise<ProjectInfo> {
     lastActivity,
     isConnected,
     variableCount,
+    services,
   };
 }
 
@@ -140,9 +218,8 @@ export async function getProjectInfo(projectId: string): Promise<ProjectInfo> {
  * Check if a project is stale (no activity for STALE_THRESHOLD_MS)
  */
 export function isProjectStale(info: ProjectInfo): boolean {
-  if (!info.isConnected) return true;
-  if (info.lastActivity === null) return true;
-  return Date.now() - info.lastActivity > STALE_THRESHOLD_MS;
+  // Stale only if scanner service isn't responding
+  return !info.isConnected;
 }
 
 /**

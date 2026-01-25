@@ -1,5 +1,5 @@
 import SchemaBuilder from "@pothos/core";
-import type { PlcVariableKV } from "@tentacle/nats-schema";
+import type { PlcVariableKV, ServiceHeartbeat } from "@tentacle/nats-schema";
 
 // Project info type (must match ProjectInfo from nats/client.ts)
 export interface ProjectConfig {
@@ -7,6 +7,7 @@ export interface ProjectConfig {
   lastActivity: number | null;
   isConnected: boolean;
   variableCount: number;
+  services: ServiceHeartbeat[];
 }
 
 // Device configuration type for EtherNet/IP PLCs
@@ -39,6 +40,7 @@ export const builder = new SchemaBuilder<{
     Variable: PlcVariableKV;
     Device: DeviceConfig;
     Tag: TagConfig;
+    Service: ServiceHeartbeat;
   };
   Scalars: {
     JSON: { Input: unknown; Output: unknown };

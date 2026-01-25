@@ -3,6 +3,8 @@ import {
   getProjectsWithInfo,
   listVariables,
   getVariable,
+  getAllHeartbeats,
+  getProjectHeartbeats,
 } from "../nats/client.ts";
 import {
   listDevices,
@@ -91,6 +93,21 @@ builder.queryType({
       },
       resolve: async (_root: unknown, args: { projectId: string }) => {
         return await getMqttConfig(args.projectId);
+      },
+    }),
+
+    // List all active services across all projects
+    services: t.field({
+      type: ["Service"],
+      args: {
+        projectId: t.arg.string({ required: false }),
+      },
+      description: "List active tentacle services. Optionally filter by projectId.",
+      resolve: async (_root: unknown, args: { projectId?: string | null }) => {
+        if (args.projectId) {
+          return await getProjectHeartbeats(args.projectId);
+        }
+        return await getAllHeartbeats();
       },
     }),
   }),

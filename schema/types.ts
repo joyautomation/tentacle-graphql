@@ -1,6 +1,35 @@
 import { builder } from "./builder.ts";
-import type { PlcVariableKV, DeadBandConfig } from "@tentacle/nats-schema";
+import type { PlcVariableKV, DeadBandConfig, ServiceHeartbeat } from "@tentacle/nats-schema";
 import type { ProjectInfo } from "../nats/client.ts";
+
+// Service object type (represents a tentacle service instance)
+const ServiceRef = builder.objectRef<ServiceHeartbeat>("Service");
+builder.objectType(ServiceRef, {
+  fields: (t) => ({
+    serviceType: t.exposeString("serviceType"),
+    instanceId: t.exposeString("instanceId"),
+    projectId: t.exposeString("projectId"),
+    lastSeen: t.field({
+      type: "DateTime",
+      resolve: (s) => new Date(s.lastSeen),
+    }),
+    startedAt: t.field({
+      type: "DateTime",
+      resolve: (s) => new Date(s.startedAt),
+    }),
+    version: t.exposeString("version", { nullable: true }),
+    uptime: t.field({
+      type: "Int",
+      description: "Uptime in seconds",
+      resolve: (s) => Math.floor((Date.now() - s.startedAt) / 1000),
+    }),
+    metadata: t.field({
+      type: "JSON",
+      nullable: true,
+      resolve: (s) => s.metadata || null,
+    }),
+  }),
+});
 
 // Project object type with activity tracking
 builder.objectType("Project", {
@@ -16,11 +45,14 @@ builder.objectType("Project", {
     isStale: t.field({
       type: "Boolean",
       resolve: (p: ProjectInfo) => {
-        if (!p.isConnected) return true;
-        if (p.lastActivity === null) return true;
-        // Stale if no activity for 5 minutes
-        return Date.now() - p.lastActivity > 5 * 60 * 1000;
+        // Stale = no active services for this project
+        return !p.isConnected;
       },
+    }),
+    services: t.field({
+      type: [ServiceRef],
+      description: "Active tentacle services for this project",
+      resolve: (p: ProjectInfo) => p.services,
     }),
   }),
 });

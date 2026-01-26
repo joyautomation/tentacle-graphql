@@ -72,6 +72,7 @@ builder.objectType(DeadBandConfigType, {
 builder.objectType("Variable", {
   fields: (t) => ({
     projectId: t.exposeString("projectId"),
+    deviceId: t.exposeString("deviceId", { nullable: true }),
     variableId: t.exposeString("variableId"),
     value: t.field({
       type: "JSON",

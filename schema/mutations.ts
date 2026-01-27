@@ -20,6 +20,7 @@ import {
   MqttVariableConfigInputRef,
   MqttVariableConfigRef,
   MqttDefaultsRef,
+  BrowseResultRef,
   type DeviceInputShape,
   type TagInputShape,
 } from "./types.ts";
@@ -210,15 +211,17 @@ builder.mutationType({
     // ═══════════════════════════════════════════════════════════════════════
 
     // Trigger a browse operation to discover available PLC tags
+    // Use async: true for large PLCs to get real-time progress via browseProgress subscription
     browseTags: t.field({
-      type: ["Variable"],
+      type: BrowseResultRef,
       args: {
         projectId: t.arg.string({ required: true }),
         plcId: t.arg.string({ required: false }), // Optional: browse specific PLC
+        async: t.arg.boolean({ required: false, defaultValue: false }), // If true, returns immediately with browseId
       },
       resolve: async (_root, args) => {
-        const variables = await browseTags(args.projectId, args.plcId ?? undefined);
-        return variables;
+        const result = await browseTags(args.projectId, args.plcId ?? undefined, args.async ?? false);
+        return result;
       },
     }),
 

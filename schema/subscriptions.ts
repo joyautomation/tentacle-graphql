@@ -1,6 +1,8 @@
 import { builder } from "./builder.ts";
 import { WatcherManager } from "../nats/watcher.ts";
-import type { PlcVariableKV } from "@tentacle/nats-schema";
+import { subscribeToBrowseProgress } from "../nats/client.ts";
+import type { PlcVariableKV, BrowseProgressMessage } from "@tentacle/nats-schema";
+import { BrowseProgressRef } from "./types.ts";
 
 const watcherManager = new WatcherManager();
 
@@ -47,6 +49,23 @@ builder.subscriptionType({
         }
       },
       resolve: (variable: PlcVariableKV) => variable,
+    }),
+
+    // Subscribe to browse progress updates
+    // Use after calling browseTags mutation with async: true
+    browseProgress: t.field({
+      type: BrowseProgressRef,
+      args: {
+        browseId: t.arg.string({ required: true }),
+      },
+      subscribe: async function* (_root: unknown, args: { browseId: string }) {
+        const progressStream = await subscribeToBrowseProgress(args.browseId);
+
+        for await (const progress of progressStream) {
+          yield progress;
+        }
+      },
+      resolve: (progress: BrowseProgressMessage) => progress,
     }),
   }),
 });

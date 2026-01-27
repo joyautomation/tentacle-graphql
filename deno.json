@@ -11,7 +11,7 @@
     "@nats-io/transport-deno": "jsr:@nats-io/transport-deno@3.3",
     "@nats-io/jetstream": "jsr:@nats-io/jetstream@3.3",
     "@nats-io/kv": "jsr:@nats-io/kv@3",
-    "@tentacle/nats-schema": "file:///home/joyja/Development/nats-schema/src/mod.ts"
+    "@tentacle/nats-schema": "../nats-schema/src/mod.ts"
   },
   "compilerOptions": {
     "lib": ["deno.window", "deno.unstable"]

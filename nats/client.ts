@@ -2,7 +2,8 @@ import { connect, type NatsConnection } from "@nats-io/transport-deno";
 import { jetstream, type JetStreamClient } from "@nats-io/jetstream";
 import { Kvm, type KV } from "@nats-io/kv";
 import { createLogger, LogLevel } from "@joyautomation/coral";
-import type { PlcVariableKV, ServiceHeartbeat, TentacleServiceType } from "@tentacle/nats-schema";
+import type { PlcVariableKV, ServiceHeartbeat, BrowseProgressMessage } from "@tentacle/nats-schema";
+import { NATS_TOPICS, substituteTopic, isBrowseProgressMessage } from "@tentacle/nats-schema";
 import type { NatsConfig } from "../types/config.ts";
 
 const log = createLogger("graphql-nats", LogLevel.info);
@@ -391,37 +392,68 @@ export async function publishCommand(
 }
 
 /**
+ * Browse result type for async mode
+ */
+export type BrowseResult = {
+  browseId: string;
+  variables?: PlcVariableKV[];
+};
+
+/**
  * Trigger a browse operation on PLC(s) to discover available tags
- * Returns the list of discovered variables (fills cache for future queries)
+ *
+ * @param projectId - Project to browse
+ * @param plcId - Optional specific PLC to browse
+ * @param async - If true, returns immediately with browseId for progress tracking
+ * @returns In sync mode: variables array. In async mode: { browseId } only
  */
 export async function browseTags(
   projectId: string,
   plcId?: string,
-): Promise<PlcVariableKV[]> {
+  async?: boolean,
+): Promise<BrowseResult> {
   try {
     const nc = getNatsConnection();
     const subject = `plc.browse.${projectId}`;
 
     // Build request payload
-    const requestData = plcId ? JSON.stringify({ plcId }) : new Uint8Array(0);
+    const payload: Record<string, unknown> = {};
+    if (plcId) payload.plcId = plcId;
+    if (async) payload.async = true;
 
-    // Browse can take a while (UDT expansion), use longer timeout
-    log.info(`Requesting browse for project ${projectId}${plcId ? ` (PLC: ${plcId})` : ""}`);
-    const response = await nc.request(
-      subject,
-      typeof requestData === "string" ? new TextEncoder().encode(requestData) : requestData,
-      { timeout: 60000 }, // 60 second timeout for browse
-    );
+    const requestData = Object.keys(payload).length > 0
+      ? new TextEncoder().encode(JSON.stringify(payload))
+      : new Uint8Array(0);
+
+    log.info(`Requesting browse for project ${projectId}${plcId ? ` (PLC: ${plcId})` : ""}${async ? " (async)" : ""}`);
+
+    // Use shorter timeout for async mode (just waiting for browseId response)
+    // Use longer timeout for sync mode (waiting for full browse)
+    const timeout = async ? 5000 : 120000;
+
+    const response = await nc.request(subject, requestData, { timeout });
 
     if (response.data && response.data.length > 0) {
-      const variables = JSON.parse(new TextDecoder().decode(response.data));
-      log.info(`Browse complete: ${variables.length} tags discovered`);
-      return variables.map((v: Record<string, unknown>) =>
-        normalizeVariable(v, projectId, v.variableId as string)
-      );
+      const data = JSON.parse(new TextDecoder().decode(response.data));
+
+      // Async mode returns { browseId }
+      if (async && data.browseId) {
+        log.info(`Async browse started with ID: ${data.browseId}`);
+        return { browseId: data.browseId };
+      }
+
+      // Sync mode returns array of variables
+      if (Array.isArray(data)) {
+        log.info(`Browse complete: ${data.length} tags discovered`);
+        const variables = data.map((v: Record<string, unknown>) =>
+          normalizeVariable(v, projectId, v.variableId as string)
+        );
+        // Generate a browseId for consistency (even in sync mode)
+        return { browseId: crypto.randomUUID(), variables };
+      }
     }
 
-    return [];
+    return { browseId: crypto.randomUUID(), variables: [] };
   } catch (error) {
     log.error(`Browse request failed for project ${projectId}:`, error);
     throw new Error(`Browse failed: ${error}`);
@@ -486,6 +518,49 @@ export async function unsubscribeTags(
     log.error(`Unsubscribe request failed:`, error);
     throw new Error(`Unsubscribe failed: ${error}`);
   }
+}
+
+/**
+ * Subscribe to browse progress updates for a specific browse operation
+ * Returns an async iterable that yields BrowseProgressMessage updates
+ */
+export async function subscribeToBrowseProgress(
+  browseId: string,
+): Promise<AsyncIterable<BrowseProgressMessage>> {
+  const nc = getNatsConnection();
+  const subject = substituteTopic(NATS_TOPICS.plc.browseProgress, { browseId });
+
+  log.info(`Subscribing to browse progress on ${subject}`);
+  const sub = nc.subscribe(subject);
+
+  return {
+    [Symbol.asyncIterator]: async function* () {
+      try {
+        for await (const msg of sub) {
+          try {
+            const data = msg.data;
+            if (data && data.length > 0) {
+              const rawData = JSON.parse(new TextDecoder().decode(data));
+              if (isBrowseProgressMessage(rawData)) {
+                yield rawData;
+                // Stop iteration when browse is completed or failed
+                if (rawData.phase === "completed" || rawData.phase === "failed") {
+                  break;
+                }
+              }
+            }
+          } catch (error) {
+            log.warn("Error parsing browse progress:", error);
+          }
+        }
+      } catch (error) {
+        log.warn("Error in browse progress subscription:", error);
+      } finally {
+        sub.unsubscribe();
+        log.info(`Unsubscribed from browse progress ${browseId}`);
+      }
+    },
+  };
 }
 
 /**

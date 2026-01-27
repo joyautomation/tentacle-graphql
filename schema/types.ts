@@ -1,5 +1,5 @@
 import { builder } from "./builder.ts";
-import type { PlcVariableKV, DeadBandConfig, ServiceHeartbeat } from "@tentacle/nats-schema";
+import type { PlcVariableKV, DeadBandConfig, ServiceHeartbeat, BrowseProgressMessage } from "@tentacle/nats-schema";
 import type { ProjectInfo } from "../nats/client.ts";
 
 // Service object type (represents a tentacle service instance)
@@ -292,5 +292,51 @@ builder.inputType(MqttVariableConfigInputRef, {
   fields: (t) => ({
     enabled: t.boolean({ required: true }),
     deadband: t.field({ type: DeadBandInputRef, required: false }),
+  }),
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Browse Progress Types
+// ═══════════════════════════════════════════════════════════════════════════
+
+// BrowseProgress object type - for subscription updates during browse
+export const BrowseProgressRef = builder.objectRef<BrowseProgressMessage>("BrowseProgress");
+builder.objectType(BrowseProgressRef, {
+  fields: (t) => ({
+    browseId: t.exposeString("browseId"),
+    projectId: t.exposeString("projectId"),
+    deviceId: t.exposeString("deviceId"),
+    phase: t.exposeString("phase"),
+    totalTags: t.exposeInt("totalTags"),
+    completedTags: t.exposeInt("completedTags"),
+    errorCount: t.exposeInt("errorCount"),
+    message: t.exposeString("message", { nullable: true }),
+    timestamp: t.field({
+      type: "DateTime",
+      resolve: (p) => new Date(p.timestamp),
+    }),
+    percentComplete: t.field({
+      type: "Float",
+      description: "Percentage of browse operation complete (0-100)",
+      resolve: (p) => p.totalTags > 0 ? Math.round((p.completedTags / p.totalTags) * 100) : 0,
+    }),
+  }),
+});
+
+// BrowseResult type - returned from browseTags mutation
+export interface BrowseResultShape {
+  browseId: string;
+  variables?: PlcVariableKV[];
+}
+
+export const BrowseResultRef = builder.objectRef<BrowseResultShape>("BrowseResult");
+builder.objectType(BrowseResultRef, {
+  fields: (t) => ({
+    browseId: t.exposeString("browseId"),
+    variables: t.field({
+      type: ["Variable"],
+      nullable: true,
+      resolve: (r) => r.variables || null,
+    }),
   }),
 });

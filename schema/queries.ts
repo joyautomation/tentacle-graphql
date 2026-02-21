@@ -1,38 +1,34 @@
 import { builder } from "./builder.ts";
 import {
-  getProjectsWithInfo,
   listVariables,
   getVariable,
   getAllHeartbeats,
-  getProjectHeartbeats,
+  getNatsConnection,
 } from "../nats/client.ts";
-import {
-  listDevices,
-  getDevice,
-  listTags,
-} from "../nats/config.ts";
-import { getMqttConfig } from "../nats/mqtt.ts";
-import { MqttProjectConfigRef } from "./types.ts";
+import { getRecentLogs } from "../modules/logs.ts";
+import { LogEntryRef, NatsTrafficEntryRef, NetworkStateRef, NetworkInterfaceConfigRef, NftablesConfigRef } from "./types.ts";
+import { getMode } from "../types/config.ts";
+import { getRecentTraffic } from "../modules/nats-traffic.ts";
+import { requestNetworkState, requestNetworkConfig } from "../modules/network.ts";
+import { requestNftablesConfig } from "../modules/nftables.ts";
 
 builder.queryType({
   fields: (t) => ({
-    // List all available projects with activity info
-    projects: t.field({
-      type: ["Project"],
-      resolve: async () => {
-        return await getProjectsWithInfo();
-      },
+    // Current deployment mode (dev, systemd, docker, kubernetes)
+    mode: t.field({
+      type: "String",
+      description: "Current deployment mode of tentacle-graphql",
+      resolve: () => getMode(),
     }),
 
-    // List variables for a project
+    // List variables (optionally filter by moduleId)
     variables: t.field({
       type: ["Variable"],
       args: {
-        projectId: t.arg.string({ required: true }),
+        moduleId: t.arg.string({ required: false }),
       },
-      resolve: async (_root: unknown, args: { projectId: string }) => {
-        const variables = await listVariables(args.projectId);
-        return variables;
+      resolve: async (_root: unknown, args: { moduleId?: string | null }) => {
+        return await listVariables(args.moduleId ?? undefined);
       },
     }),
 
@@ -41,73 +37,86 @@ builder.queryType({
       type: "Variable",
       nullable: true,
       args: {
-        projectId: t.arg.string({ required: true }),
         variableId: t.arg.string({ required: true }),
       },
-      resolve: async (_root: unknown, args: { projectId: string; variableId: string }) => {
-        return await getVariable(args.projectId, args.variableId);
+      resolve: async (_root: unknown, args: { variableId: string }) => {
+        return await getVariable(args.variableId);
       },
     }),
 
-    // List all devices for a project
-    devices: t.field({
-      type: ["Device"],
+    // Get recent log entries for a service
+    serviceLogs: t.field({
+      type: [LogEntryRef],
       args: {
-        projectId: t.arg.string({ required: true }),
+        serviceType: t.arg.string({ required: true }),
+        limit: t.arg.int({ required: false }),
       },
-      resolve: async (_root: unknown, args: { projectId: string }) => {
-        return await listDevices(args.projectId);
+      description: "Get recent log entries for a service type from the ring buffer",
+      resolve: (_root: unknown, args: { serviceType: string; limit?: number | null }) => {
+        return getRecentLogs(args.serviceType, args.limit ?? undefined);
       },
     }),
 
-    // Get a specific device
-    device: t.field({
-      type: "Device",
-      nullable: true,
+    // Get recent NATS traffic entries
+    natsTraffic: t.field({
+      type: [NatsTrafficEntryRef],
       args: {
-        projectId: t.arg.string({ required: true }),
-        deviceId: t.arg.string({ required: true }),
+        limit: t.arg.int({ required: false }),
       },
-      resolve: async (_root: unknown, args: { projectId: string; deviceId: string }) => {
-        return await getDevice(args.projectId, args.deviceId);
-      },
-    }),
-
-    // List tags for a device
-    tags: t.field({
-      type: ["Tag"],
-      args: {
-        projectId: t.arg.string({ required: true }),
-        deviceId: t.arg.string({ required: true }),
-      },
-      resolve: async (_root: unknown, args: { projectId: string; deviceId: string }) => {
-        return await listTags(args.projectId, args.deviceId);
+      description: "Get recent NATS traffic entries from the ring buffer",
+      resolve: (_root: unknown, args: { limit?: number | null }) => {
+        return getRecentTraffic(args.limit ?? undefined);
       },
     }),
 
-    // Get MQTT configuration for a project
-    mqttConfig: t.field({
-      type: MqttProjectConfigRef,
-      args: {
-        projectId: t.arg.string({ required: true }),
-      },
-      resolve: async (_root: unknown, args: { projectId: string }) => {
-        return await getMqttConfig(args.projectId);
-      },
-    }),
-
-    // List all active services across all projects
+    // List all active services
     services: t.field({
       type: ["Service"],
-      args: {
-        projectId: t.arg.string({ required: false }),
-      },
-      description: "List active tentacle services. Optionally filter by projectId.",
-      resolve: async (_root: unknown, args: { projectId?: string | null }) => {
-        if (args.projectId) {
-          return await getProjectHeartbeats(args.projectId);
-        }
+      description: "List active tentacle services.",
+      resolve: async () => {
         return await getAllHeartbeats();
+      },
+    }),
+
+    // Get fresh network interface state from the kernel
+    networkInterfaces: t.field({
+      type: NetworkStateRef,
+      description: "Request fresh network interface state from tentacle-network (live kernel data)",
+      resolve: async () => {
+        try {
+          const nc = getNatsConnection();
+          return await requestNetworkState(nc);
+        } catch {
+          return { moduleId: "network", timestamp: Date.now(), interfaces: [] };
+        }
+      },
+    }),
+
+    // Get current netplan configuration
+    networkConfig: t.field({
+      type: [NetworkInterfaceConfigRef],
+      description: "Get current network configuration from tentacle-network's netplan file",
+      resolve: async () => {
+        try {
+          const nc = getNatsConnection();
+          return await requestNetworkConfig(nc);
+        } catch {
+          return [];
+        }
+      },
+    }),
+
+    // Get current nftables NAT configuration
+    nftablesConfig: t.field({
+      type: NftablesConfigRef,
+      description: "Get current nftables NAT configuration",
+      resolve: async () => {
+        try {
+          const nc = getNatsConnection();
+          return await requestNftablesConfig(nc);
+        } catch {
+          return { natRules: [] };
+        }
       },
     }),
   }),

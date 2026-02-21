@@ -1,14 +1,12 @@
 import { builder } from "./builder.ts";
 import type { PlcVariableKV, DeadBandConfig, ServiceHeartbeat, BrowseProgressMessage } from "@tentacle/nats-schema";
-import type { ProjectInfo } from "../nats/client.ts";
 
 // Service object type (represents a tentacle service instance)
 const ServiceRef = builder.objectRef<ServiceHeartbeat>("Service");
 builder.objectType(ServiceRef, {
   fields: (t) => ({
     serviceType: t.exposeString("serviceType"),
-    instanceId: t.exposeString("instanceId"),
-    projectId: t.exposeString("projectId"),
+    moduleId: t.exposeString("moduleId"),
     lastSeen: t.field({
       type: "DateTime",
       resolve: (s) => new Date(s.lastSeen),
@@ -31,32 +29,6 @@ builder.objectType(ServiceRef, {
   }),
 });
 
-// Project object type with activity tracking
-builder.objectType("Project", {
-  fields: (t) => ({
-    id: t.exposeString("id"),
-    lastActivity: t.field({
-      type: "DateTime",
-      nullable: true,
-      resolve: (p: ProjectInfo) => p.lastActivity ? new Date(p.lastActivity) : null,
-    }),
-    isConnected: t.exposeBoolean("isConnected"),
-    variableCount: t.exposeInt("variableCount"),
-    isStale: t.field({
-      type: "Boolean",
-      resolve: (p: ProjectInfo) => {
-        // Stale = no active services for this project
-        return !p.isConnected;
-      },
-    }),
-    services: t.field({
-      type: [ServiceRef],
-      description: "Active tentacle services for this project",
-      resolve: (p: ProjectInfo) => p.services,
-    }),
-  }),
-});
-
 // DeadBandConfig object type
 const DeadBandConfigType = builder.objectRef<DeadBandConfig>(
   "DeadBandConfig",
@@ -71,7 +43,7 @@ builder.objectType(DeadBandConfigType, {
 // Variable object type (based on PlcVariableKV)
 builder.objectType("Variable", {
   fields: (t) => ({
-    projectId: t.exposeString("projectId"),
+    moduleId: t.exposeString("moduleId"),
     deviceId: t.exposeString("deviceId", { nullable: true }),
     variableId: t.exposeString("variableId"),
     value: t.field({
@@ -84,8 +56,9 @@ builder.objectType("Variable", {
       type: "DateTime",
       resolve: (v) => new Date(v.lastUpdated),
     }),
-    source: t.exposeString("source"),
+    origin: t.exposeString("origin"),
     quality: t.exposeString("quality"),
+    source: t.exposeString("source", { nullable: true }),
     deadband: t.field({
       type: DeadBandConfigType,
       nullable: true,
@@ -113,188 +86,6 @@ builder.inputType("VariableUpdate", {
   }),
 });
 
-// Device object type for EtherNet/IP PLCs
-builder.objectType("Device", {
-  fields: (t) => ({
-    id: t.exposeString("id"),
-    projectId: t.exposeString("projectId"),
-    host: t.exposeString("host"),
-    port: t.exposeInt("port"),
-    type: t.exposeString("type"),
-    slot: t.exposeInt("slot", { nullable: true }),
-    scanRate: t.exposeInt("scanRate"),
-    enabled: t.exposeBoolean("enabled"),
-  }),
-});
-
-// Tag object type
-builder.objectType("Tag", {
-  fields: (t) => ({
-    id: t.exposeString("id"),
-    deviceId: t.exposeString("deviceId"),
-    address: t.exposeString("address"),
-    datatype: t.exposeString("datatype", { nullable: true }),
-    writable: t.exposeBoolean("writable"),
-    deadbandValue: t.exposeFloat("deadbandValue", { nullable: true }),
-    deadbandMaxTime: t.exposeInt("deadbandMaxTime", { nullable: true }),
-    disableRBE: t.exposeBoolean("disableRBE", { nullable: true }),
-  }),
-});
-
-// Input type shapes for TypeScript
-export interface DeviceInputShape {
-  host: string;
-  port?: number;
-  type: string;
-  slot?: number;
-  scanRate?: number;
-  enabled?: boolean;
-}
-
-export interface TagInputShape {
-  address: string;
-  datatype?: string;
-  writable?: boolean;
-  deadbandValue?: number;
-  deadbandMaxTime?: number;
-  disableRBE?: boolean;
-}
-
-// DeviceInput for creating/updating devices
-export const DeviceInputRef = builder.inputRef<DeviceInputShape>("DeviceInput");
-builder.inputType(DeviceInputRef, {
-  fields: (t) => ({
-    host: t.string({ required: true }),
-    port: t.int({ required: false, defaultValue: 44818 }),
-    type: t.string({ required: true }), // "rockwell" or "generic-cip"
-    slot: t.int({ required: false }),
-    scanRate: t.int({ required: false, defaultValue: 1000 }),
-    enabled: t.boolean({ required: false, defaultValue: true }),
-  }),
-});
-
-// TagInput for creating/updating tags
-export const TagInputRef = builder.inputRef<TagInputShape>("TagInput");
-builder.inputType(TagInputRef, {
-  fields: (t) => ({
-    address: t.string({ required: true }),
-    datatype: t.string({ required: false }),
-    writable: t.boolean({ required: false, defaultValue: false }),
-    deadbandValue: t.float({ required: false }),
-    deadbandMaxTime: t.int({ required: false }),
-    disableRBE: t.boolean({ required: false }),
-  }),
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// MQTT Configuration Types
-// ═══════════════════════════════════════════════════════════════════════════
-
-import type {
-  MqttVariableConfig,
-  MqttDefaults,
-  MqttProjectConfig,
-} from "../nats/mqtt.ts";
-
-// Type shapes for MQTT config
-type MqttVariableEntry = MqttVariableConfig & { variableId: string };
-
-// Object refs (must be created before objectType)
-const MqttVariableConfigRef = builder.objectRef<MqttVariableConfig>("MqttVariableConfig");
-const MqttDefaultsRef = builder.objectRef<MqttDefaults>("MqttDefaults");
-const MqttVariableEntryRef = builder.objectRef<MqttVariableEntry>("MqttVariableEntry");
-const MqttProjectConfigRef = builder.objectRef<MqttProjectConfig>("MqttProjectConfig");
-
-// MqttVariableConfig object type
-builder.objectType(MqttVariableConfigRef, {
-  fields: (t) => ({
-    enabled: t.exposeBoolean("enabled"),
-    deadband: t.field({
-      type: DeadBandConfigType,
-      nullable: true,
-      resolve: (v) => v.deadband || null,
-    }),
-  }),
-});
-
-// MqttDefaults object type
-builder.objectType(MqttDefaultsRef, {
-  fields: (t) => ({
-    deadband: t.field({
-      type: DeadBandConfigType,
-      resolve: (v) => v.deadband,
-    }),
-  }),
-});
-
-// MqttVariableEntry for returning variable config with its ID
-builder.objectType(MqttVariableEntryRef, {
-  fields: (t) => ({
-    variableId: t.exposeString("variableId"),
-    enabled: t.exposeBoolean("enabled"),
-    deadband: t.field({
-      type: DeadBandConfigType,
-      nullable: true,
-      resolve: (v) => v.deadband || null,
-    }),
-  }),
-});
-
-// MqttProjectConfig object type
-builder.objectType(MqttProjectConfigRef, {
-  fields: (t) => ({
-    defaults: t.field({
-      type: MqttDefaultsRef,
-      resolve: (v) => v.defaults,
-    }),
-    variables: t.field({
-      type: [MqttVariableEntryRef],
-      resolve: (v) =>
-        Object.entries(v.variables).map(([variableId, config]) => ({
-          variableId,
-          ...config,
-        })),
-    }),
-    enabledCount: t.field({
-      type: "Int",
-      resolve: (v) =>
-        Object.values(v.variables).filter((c) => c.enabled).length,
-    }),
-  }),
-});
-
-// Export refs for use in mutations/queries
-export { MqttVariableConfigRef, MqttDefaultsRef, MqttProjectConfigRef };
-
-// Input types for MQTT config
-export interface DeadBandInputShape {
-  value: number;
-  maxTime?: number | null;
-}
-
-export const DeadBandInputRef = builder.inputRef<DeadBandInputShape>("DeadBandInput");
-builder.inputType(DeadBandInputRef, {
-  fields: (t) => ({
-    value: t.float({ required: true }),
-    maxTime: t.int({ required: false }),
-  }),
-});
-
-export interface MqttVariableConfigInputShape {
-  enabled: boolean;
-  deadband?: DeadBandInputShape | null;
-}
-
-export const MqttVariableConfigInputRef = builder.inputRef<MqttVariableConfigInputShape>(
-  "MqttVariableConfigInput",
-);
-builder.inputType(MqttVariableConfigInputRef, {
-  fields: (t) => ({
-    enabled: t.boolean({ required: true }),
-    deadband: t.field({ type: DeadBandInputRef, required: false }),
-  }),
-});
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Browse Progress Types
 // ═══════════════════════════════════════════════════════════════════════════
@@ -304,7 +95,7 @@ export const BrowseProgressRef = builder.objectRef<BrowseProgressMessage>("Brows
 builder.objectType(BrowseProgressRef, {
   fields: (t) => ({
     browseId: t.exposeString("browseId"),
-    projectId: t.exposeString("projectId"),
+    moduleId: t.exposeString("moduleId"),
     deviceId: t.exposeString("deviceId"),
     phase: t.exposeString("phase"),
     totalTags: t.exposeInt("totalTags"),
@@ -340,3 +131,240 @@ builder.objectType(BrowseResultRef, {
     }),
   }),
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Service Log Types
+// ═══════════════════════════════════════════════════════════════════════════
+
+import type { ServiceLogEntry } from "@tentacle/nats-schema";
+
+const LogEntryRef = builder.objectRef<ServiceLogEntry>("LogEntry");
+builder.objectType(LogEntryRef, {
+  fields: (t) => ({
+    timestamp: t.field({
+      type: "DateTime",
+      resolve: (e) => new Date(e.timestamp),
+    }),
+    level: t.exposeString("level"),
+    message: t.exposeString("message"),
+    serviceType: t.exposeString("serviceType"),
+    moduleId: t.exposeString("moduleId"),
+    logger: t.exposeString("logger", { nullable: true }),
+  }),
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// NATS Traffic Types
+// ═══════════════════════════════════════════════════════════════════════════
+
+import type { NatsTrafficEntry } from "../modules/nats-traffic.ts";
+
+const NatsTrafficEntryRef = builder.objectRef<NatsTrafficEntry>("NatsTrafficEntry");
+builder.objectType(NatsTrafficEntryRef, {
+  fields: (t) => ({
+    timestamp: t.field({
+      type: "DateTime",
+      resolve: (e) => new Date(e.timestamp),
+    }),
+    subject: t.exposeString("subject"),
+    size: t.exposeInt("size"),
+    payload: t.exposeString("payload"),
+  }),
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Network Types
+// ═══════════════════════════════════════════════════════════════════════════
+
+import type {
+  NetworkInterfaceStats,
+  NetworkAddress,
+  NetworkInterface,
+  NetworkStateMessage,
+  NetworkInterfaceConfig,
+  NetworkCommandResponse,
+} from "@tentacle/nats-schema";
+
+const NetworkInterfaceStatsRef = builder.objectRef<NetworkInterfaceStats>("NetworkInterfaceStats");
+builder.objectType(NetworkInterfaceStatsRef, {
+  fields: (t) => ({
+    rxBytes: t.exposeFloat("rxBytes"),
+    txBytes: t.exposeFloat("txBytes"),
+    rxPackets: t.exposeFloat("rxPackets"),
+    txPackets: t.exposeFloat("txPackets"),
+    rxErrors: t.exposeFloat("rxErrors"),
+    txErrors: t.exposeFloat("txErrors"),
+    rxDropped: t.exposeFloat("rxDropped"),
+    txDropped: t.exposeFloat("txDropped"),
+  }),
+});
+
+const NetworkAddressRef = builder.objectRef<NetworkAddress>("NetworkAddress");
+builder.objectType(NetworkAddressRef, {
+  fields: (t) => ({
+    family: t.exposeString("family"),
+    address: t.exposeString("address"),
+    prefixlen: t.exposeInt("prefixlen"),
+    scope: t.exposeString("scope"),
+    broadcast: t.exposeString("broadcast", { nullable: true }),
+  }),
+});
+
+const NetworkInterfaceRef = builder.objectRef<NetworkInterface>("NetworkInterface");
+builder.objectType(NetworkInterfaceRef, {
+  fields: (t) => ({
+    name: t.exposeString("name"),
+    operstate: t.exposeString("operstate"),
+    carrier: t.exposeBoolean("carrier"),
+    speed: t.exposeInt("speed", { nullable: true }),
+    duplex: t.exposeString("duplex", { nullable: true }),
+    mac: t.exposeString("mac"),
+    mtu: t.exposeInt("mtu"),
+    type: t.exposeInt("type"),
+    flags: t.exposeStringList("flags"),
+    addresses: t.field({
+      type: [NetworkAddressRef],
+      resolve: (iface) => iface.addresses,
+    }),
+    statistics: t.field({
+      type: NetworkInterfaceStatsRef,
+      resolve: (iface) => iface.statistics,
+    }),
+  }),
+});
+
+const NetworkStateRef = builder.objectRef<NetworkStateMessage>("NetworkState");
+builder.objectType(NetworkStateRef, {
+  fields: (t) => ({
+    moduleId: t.exposeString("moduleId"),
+    timestamp: t.field({
+      type: "DateTime",
+      resolve: (s) => new Date(s.timestamp),
+    }),
+    interfaces: t.field({
+      type: [NetworkInterfaceRef],
+      resolve: (s) => s.interfaces,
+    }),
+  }),
+});
+
+const NetworkInterfaceConfigRef = builder.objectRef<NetworkInterfaceConfig>("NetworkInterfaceConfig");
+builder.objectType(NetworkInterfaceConfigRef, {
+  fields: (t) => ({
+    interfaceName: t.exposeString("interfaceName"),
+    dhcp4: t.exposeBoolean("dhcp4", { nullable: true }),
+    addresses: t.exposeStringList("addresses", { nullable: true }),
+    gateway4: t.exposeString("gateway4", { nullable: true }),
+    nameservers: t.exposeStringList("nameservers", { nullable: true }),
+    mtu: t.exposeInt("mtu", { nullable: true }),
+  }),
+});
+
+const NetworkCommandResultRef = builder.objectRef<NetworkCommandResponse>("NetworkCommandResult");
+builder.objectType(NetworkCommandResultRef, {
+  fields: (t) => ({
+    requestId: t.exposeString("requestId"),
+    success: t.exposeBoolean("success"),
+    error: t.exposeString("error", { nullable: true }),
+    timestamp: t.field({
+      type: "DateTime",
+      resolve: (r) => new Date(r.timestamp),
+    }),
+  }),
+});
+
+// Input type for applying network config
+const NetworkInterfaceConfigInputRef = builder.inputType("NetworkInterfaceConfigInput", {
+  fields: (t) => ({
+    interfaceName: t.string({ required: true }),
+    dhcp4: t.boolean({ required: false }),
+    addresses: t.stringList({ required: false }),
+    gateway4: t.string({ required: false }),
+    nameservers: t.stringList({ required: false }),
+    mtu: t.int({ required: false }),
+  }),
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Nftables Types
+// ═══════════════════════════════════════════════════════════════════════════
+
+import type {
+  NatRule,
+  NftablesConfig,
+  NftablesCommandResponse,
+} from "@tentacle/nats-schema";
+
+const NatRuleRef = builder.objectRef<NatRule>("NatRule");
+builder.objectType(NatRuleRef, {
+  fields: (t) => ({
+    id: t.exposeString("id"),
+    enabled: t.exposeBoolean("enabled"),
+    protocol: t.exposeString("protocol"),
+    connectingDevices: t.exposeString("connectingDevices"),
+    incomingInterface: t.exposeString("incomingInterface"),
+    outgoingInterface: t.exposeString("outgoingInterface"),
+    natAddr: t.exposeString("natAddr"),
+    originalPort: t.exposeString("originalPort"),
+    translatedPort: t.exposeString("translatedPort"),
+    deviceAddr: t.exposeString("deviceAddr"),
+    deviceName: t.exposeString("deviceName"),
+    doubleNat: t.exposeBoolean("doubleNat"),
+    doubleNatAddr: t.exposeString("doubleNatAddr"),
+    comment: t.exposeString("comment"),
+  }),
+});
+
+const NftablesConfigRef = builder.objectRef<NftablesConfig>("NftablesConfig");
+builder.objectType(NftablesConfigRef, {
+  fields: (t) => ({
+    natRules: t.field({
+      type: [NatRuleRef],
+      resolve: (c) => c.natRules,
+    }),
+  }),
+});
+
+const NftablesCommandResultRef = builder.objectRef<NftablesCommandResponse>("NftablesCommandResult");
+builder.objectType(NftablesCommandResultRef, {
+  fields: (t) => ({
+    requestId: t.exposeString("requestId"),
+    success: t.exposeBoolean("success"),
+    error: t.exposeString("error", { nullable: true }),
+    timestamp: t.field({
+      type: "DateTime",
+      resolve: (r) => new Date(r.timestamp),
+    }),
+  }),
+});
+
+const NatRuleInputRef = builder.inputType("NatRuleInput", {
+  fields: (t) => ({
+    id: t.string({ required: true }),
+    enabled: t.boolean({ required: true }),
+    protocol: t.string({ required: true }),
+    connectingDevices: t.string({ required: true }),
+    incomingInterface: t.string({ required: true }),
+    outgoingInterface: t.string({ required: true }),
+    natAddr: t.string({ required: true }),
+    originalPort: t.string({ required: true }),
+    translatedPort: t.string({ required: true }),
+    deviceAddr: t.string({ required: true }),
+    deviceName: t.string({ required: true }),
+    doubleNat: t.boolean({ required: true }),
+    doubleNatAddr: t.string({ required: true }),
+    comment: t.string({ required: true }),
+  }),
+});
+
+export {
+  LogEntryRef,
+  NatsTrafficEntryRef,
+  NetworkStateRef,
+  NetworkInterfaceConfigRef,
+  NetworkCommandResultRef,
+  NetworkInterfaceConfigInputRef,
+  NftablesConfigRef,
+  NftablesCommandResultRef,
+  NatRuleInputRef,
+};

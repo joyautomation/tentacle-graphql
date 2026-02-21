@@ -1,9 +1,14 @@
-import { createLogger, LogLevel } from "@joyautomation/coral";
-import { connectToNats, disconnectNats } from "./nats/client.ts";
+import { createLogger, LogLevel, type Log } from "@joyautomation/coral";
+import { connectToNats, disconnectNats, getNatsConnection } from "./nats/client.ts";
 import { createGraphQLServer, startServer } from "./server.ts";
 import { loadConfig } from "./types/config.ts";
+import { initLogCollector } from "./modules/logs.ts";
+import { initNatsTrafficCollector } from "./modules/nats-traffic.ts";
+import { initNetworkCollector } from "./modules/network.ts";
+import { initNftablesCollector } from "./modules/nftables.ts";
+import type { ServiceLogEntry } from "@tentacle/nats-schema";
 
-const log = createLogger("graphql-main", LogLevel.info);
+let log: Log = createLogger("graphql-main", LogLevel.info);
 
 async function main() {
   log.info("Starting tentacle-graphql...");
@@ -21,6 +26,49 @@ async function main() {
     Deno.exit(1);
   }
 
+  // Enable NATS log streaming for graphql's own logs
+  const nc = getNatsConnection();
+  const moduleId = "graphql";
+  {
+    const subject = `service.logs.graphql.${moduleId}`;
+    const encoder = new TextEncoder();
+    const coralLog = log;
+    const publish = (level: string, msg: string, ...args: unknown[]) => {
+      try {
+        const message = args.length > 0
+          ? `${msg} ${args.map((a) => (typeof a === "string" ? a : JSON.stringify(a))).join(" ")}`
+          : msg;
+        const entry: ServiceLogEntry = {
+          timestamp: Date.now(),
+          level: level as ServiceLogEntry["level"],
+          message,
+          serviceType: "graphql",
+          moduleId,
+          logger: "graphql-main",
+        };
+        nc.publish(subject, encoder.encode(JSON.stringify(entry)));
+      } catch { /* never break the service for logging */ }
+    };
+    log = {
+      info: (m: string, ...a: unknown[]) => { coralLog.info(m, ...a); publish("info", m, ...a); },
+      warn: (m: string, ...a: unknown[]) => { coralLog.warn(m, ...a); publish("warn", m, ...a); },
+      error: (m: string, ...a: unknown[]) => { coralLog.error(m, ...a); publish("error", m, ...a); },
+      debug: (m: string, ...a: unknown[]) => { coralLog.debug(m, ...a); publish("debug", m, ...a); },
+    } as Log;
+  }
+
+  // Initialize log collector (subscribes to service.logs.> for ring buffer + subscriptions)
+  await initLogCollector(nc);
+
+  // Initialize NATS traffic collector (subscribes to > for traffic monitor)
+  initNatsTrafficCollector(nc);
+
+  // Initialize network state collector (subscribes to network.interfaces)
+  initNetworkCollector(nc);
+
+  // Initialize nftables config collector (subscribes to nftables.rules)
+  initNftablesCollector(nc);
+
   // Create and start GraphQL server
   log.info(`Creating GraphQL server on ${config.server.hostname}:${config.server.port}...`);
   const yoga = createGraphQLServer(config.server);
@@ -36,7 +84,7 @@ async function main() {
     shuttingDown = true;
     log.info(`Received ${signal}, shutting down gracefully...`);
 
-    // Disconnect NATS first (closes subscriptions)
+    // Disconnect NATS (closes subscriptions)
     try {
       await disconnectNats();
     } catch (error) {

@@ -4,20 +4,19 @@ import { subscribeToVariableUpdates } from "./client.ts";
 export interface VariableFilter {
   variableIds?: string[];
   datatypes?: string[];
-  sources?: string[];
+  origins?: string[];
   qualities?: string[];
 }
 
 export class WatcherManager {
   /**
-   * Start watching a project's variable updates and return an async iterable
+   * Start watching variable updates from all modules and return an async iterable
    * that yields filtered PlcVariableKV objects
    */
   async watch(
-    projectId: string,
     filter?: VariableFilter,
   ): Promise<AsyncIterable<PlcVariableKV> & { close: () => Promise<void> }> {
-    const variableUpdates = await subscribeToVariableUpdates(projectId);
+    const variableUpdates = await subscribeToVariableUpdates();
 
     let isActive = true;
 
@@ -42,8 +41,8 @@ export class WatcherManager {
                 continue;
               }
               if (
-                filter.sources &&
-                !filter.sources.includes(variable.source)
+                filter.origins &&
+                !filter.origins.includes(variable.origin)
               ) {
                 continue;
               }

@@ -1,29 +1,15 @@
 import { builder } from "./builder.ts";
-import { publishCommand, getVariable, browseTags, subscribeTags, unsubscribeTags, deleteProject } from "../nats/client.ts";
+import { publishCommand, getVariable, browseTags, subscribeTags, unsubscribeTags, getNatsConnection } from "../nats/client.ts";
 import {
-  upsertDevice,
-  deleteDevice,
-  upsertTag,
-  deleteTag,
-  setDeviceTags,
-} from "../nats/config.ts";
-import {
-  setMqttDefaults,
-  setMqttVariable,
-  enableMqttVariables,
-  disableMqttVariables,
-} from "../nats/mqtt.ts";
-import {
-  DeviceInputRef,
-  TagInputRef,
-  DeadBandInputRef,
-  MqttVariableConfigInputRef,
-  MqttVariableConfigRef,
-  MqttDefaultsRef,
   BrowseResultRef,
-  type DeviceInputShape,
-  type TagInputShape,
+  NetworkCommandResultRef,
+  NetworkInterfaceConfigInputRef,
+  NftablesCommandResultRef,
+  NatRuleInputRef,
 } from "./types.ts";
+import { applyNetworkConfig } from "../modules/network.ts";
+import { applyNftablesConfig } from "../modules/nftables.ts";
+import type { NetworkInterfaceConfig, NatRule } from "@tentacle/nats-schema";
 
 builder.mutationType({
   fields: (t) => ({
@@ -31,7 +17,7 @@ builder.mutationType({
     updateVariable: t.field({
       type: "Variable",
       args: {
-        projectId: t.arg.string({ required: true }),
+        moduleId: t.arg.string({ required: true }),
         variableId: t.arg.string({ required: true }),
         value: t.arg.string({ required: true }), // Accept as JSON string
       },
@@ -44,14 +30,14 @@ builder.mutationType({
           parsedValue = args.value; // Use as-is if not valid JSON
         }
 
-        // Publish command to NATS
-        await publishCommand(args.projectId, args.variableId, parsedValue);
+        // Publish command to the module's command topic
+        await publishCommand(args.moduleId, args.variableId, parsedValue);
 
         // Wait briefly for update to propagate
         await new Promise((resolve) => setTimeout(resolve, 100));
 
         // Fetch and return updated variable
-        const updated = await getVariable(args.projectId, args.variableId);
+        const updated = await getVariable(args.variableId);
 
         if (!updated) {
           throw new Error(
@@ -63,165 +49,19 @@ builder.mutationType({
       },
     }),
 
-    // Create or update a device
-    upsertDevice: t.field({
-      type: "Device",
-      args: {
-        projectId: t.arg.string({ required: true }),
-        deviceId: t.arg.string({ required: true }),
-        input: t.arg({ type: DeviceInputRef, required: true }),
-      },
-      resolve: async (_root, args) => {
-        return await upsertDevice(args.projectId, args.deviceId, args.input);
-      },
-    }),
-
-    // Delete a device
-    deleteDevice: t.field({
-      type: "Boolean",
-      args: {
-        projectId: t.arg.string({ required: true }),
-        deviceId: t.arg.string({ required: true }),
-      },
-      resolve: async (_root, args) => {
-        return await deleteDevice(args.projectId, args.deviceId);
-      },
-    }),
-
-    // Create or update a tag
-    upsertTag: t.field({
-      type: "Tag",
-      args: {
-        projectId: t.arg.string({ required: true }),
-        deviceId: t.arg.string({ required: true }),
-        tagId: t.arg.string({ required: true }),
-        input: t.arg({ type: TagInputRef, required: true }),
-      },
-      resolve: async (_root, args) => {
-        return await upsertTag(args.projectId, args.deviceId, args.tagId, args.input);
-      },
-    }),
-
-    // Delete a tag
-    deleteTag: t.field({
-      type: "Boolean",
-      args: {
-        projectId: t.arg.string({ required: true }),
-        deviceId: t.arg.string({ required: true }),
-        tagId: t.arg.string({ required: true }),
-      },
-      resolve: async (_root, args) => {
-        return await deleteTag(args.projectId, args.deviceId, args.tagId);
-      },
-    }),
-
-    // Bulk set tags for a device (replaces all existing tags)
-    setDeviceTags: t.field({
-      type: ["String"],
-      args: {
-        projectId: t.arg.string({ required: true }),
-        deviceId: t.arg.string({ required: true }),
-        tags: t.arg.stringList({ required: true }),
-      },
-      resolve: async (_root, args) => {
-        return await setDeviceTags(args.projectId, args.deviceId, args.tags);
-      },
-    }),
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // MQTT Configuration Mutations
-    // ═══════════════════════════════════════════════════════════════════════
-
-    // Set MQTT defaults (global deadband settings)
-    setMqttDefaults: t.field({
-      type: MqttDefaultsRef,
-      args: {
-        projectId: t.arg.string({ required: true }),
-        deadband: t.arg({ type: DeadBandInputRef, required: true }),
-      },
-      resolve: async (_root, args) => {
-        const deadband = {
-          value: args.deadband.value,
-          maxTime: args.deadband.maxTime ?? undefined,
-        };
-        return await setMqttDefaults(args.projectId, deadband);
-      },
-    }),
-
-    // Set config for a single MQTT variable (granular edit)
-    setMqttVariable: t.field({
-      type: MqttVariableConfigRef,
-      args: {
-        projectId: t.arg.string({ required: true }),
-        variableId: t.arg.string({ required: true }),
-        config: t.arg({ type: MqttVariableConfigInputRef, required: true }),
-      },
-      resolve: async (_root, args) => {
-        const config = {
-          enabled: args.config.enabled,
-          deadband: args.config.deadband
-            ? {
-                value: args.config.deadband.value,
-                maxTime: args.config.deadband.maxTime ?? undefined,
-              }
-            : undefined,
-        };
-        return await setMqttVariable(args.projectId, args.variableId, config);
-      },
-    }),
-
-    // Bulk enable variables for MQTT
-    enableMqttVariables: t.field({
-      type: ["String"],
-      args: {
-        projectId: t.arg.string({ required: true }),
-        variableIds: t.arg.stringList({ required: true }),
-        config: t.arg({ type: MqttVariableConfigInputRef, required: false }),
-      },
-      resolve: async (_root, args) => {
-        const config = args.config
-          ? {
-              enabled: args.config.enabled,
-              deadband: args.config.deadband
-                ? {
-                    value: args.config.deadband.value,
-                    maxTime: args.config.deadband.maxTime ?? undefined,
-                  }
-                : undefined,
-            }
-          : undefined;
-        return await enableMqttVariables(args.projectId, args.variableIds, config);
-      },
-    }),
-
-    // Bulk disable variables for MQTT
-    disableMqttVariables: t.field({
-      type: ["String"],
-      args: {
-        projectId: t.arg.string({ required: true }),
-        variableIds: t.arg.stringList({ required: true }),
-      },
-      resolve: async (_root, args) => {
-        return await disableMqttVariables(args.projectId, args.variableIds);
-      },
-    }),
-
     // ═══════════════════════════════════════════════════════════════════════
     // Scanner Control Mutations
     // ═══════════════════════════════════════════════════════════════════════
 
     // Trigger a browse operation to discover available PLC tags
-    // Use async: true for large PLCs to get real-time progress via browseProgress subscription
     browseTags: t.field({
       type: BrowseResultRef,
       args: {
-        projectId: t.arg.string({ required: true }),
-        plcId: t.arg.string({ required: false }), // Optional: browse specific PLC
-        async: t.arg.boolean({ required: false, defaultValue: false }), // If true, returns immediately with browseId
+        plcId: t.arg.string({ required: false }),
+        async: t.arg.boolean({ required: false, defaultValue: false }),
       },
       resolve: async (_root, args) => {
-        const result = await browseTags(args.projectId, args.plcId ?? undefined, args.async ?? false);
-        return result;
+        return await browseTags(args.plcId ?? undefined, args.async ?? false);
       },
     }),
 
@@ -229,12 +69,11 @@ builder.mutationType({
     subscribeToTags: t.field({
       type: "Boolean",
       args: {
-        projectId: t.arg.string({ required: true }),
         tags: t.arg.stringList({ required: true }),
         subscriberId: t.arg.string({ required: true }),
       },
       resolve: async (_root, args) => {
-        const result = await subscribeTags(args.projectId, args.tags, args.subscriberId);
+        const result = await subscribeTags(args.tags, args.subscriberId);
         return result.success;
       },
     }),
@@ -243,28 +82,60 @@ builder.mutationType({
     unsubscribeFromTags: t.field({
       type: "Boolean",
       args: {
-        projectId: t.arg.string({ required: true }),
         tags: t.arg.stringList({ required: true }),
         subscriberId: t.arg.string({ required: true }),
       },
       resolve: async (_root, args) => {
-        const result = await unsubscribeTags(args.projectId, args.tags, args.subscriberId);
+        const result = await unsubscribeTags(args.tags, args.subscriberId);
         return result.success;
       },
     }),
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // Project Management
-    // ═══════════════════════════════════════════════════════════════════════
-
-    // Delete a project and all its associated data (config, cache, mqtt config)
-    deleteProject: t.field({
-      type: "Boolean",
+    // Apply network configuration via netplan
+    applyNetworkConfig: t.field({
+      type: NetworkCommandResultRef,
       args: {
-        projectId: t.arg.string({ required: true }),
+        interfaces: t.arg({ type: [NetworkInterfaceConfigInputRef], required: true }),
       },
       resolve: async (_root, args) => {
-        return await deleteProject(args.projectId);
+        const nc = getNatsConnection();
+        const configs: NetworkInterfaceConfig[] = args.interfaces.map((i) => ({
+          interfaceName: i.interfaceName,
+          dhcp4: i.dhcp4 ?? undefined,
+          addresses: i.addresses ?? undefined,
+          gateway4: i.gateway4 ?? undefined,
+          nameservers: i.nameservers ?? undefined,
+          mtu: i.mtu ?? undefined,
+        }));
+        return await applyNetworkConfig(nc, configs);
+      },
+    }),
+
+    // Apply nftables NAT configuration
+    applyNftablesConfig: t.field({
+      type: NftablesCommandResultRef,
+      args: {
+        natRules: t.arg({ type: [NatRuleInputRef], required: true }),
+      },
+      resolve: async (_root, args) => {
+        const nc = getNatsConnection();
+        const natRules: NatRule[] = args.natRules.map((r) => ({
+          id: r.id,
+          enabled: r.enabled,
+          protocol: r.protocol,
+          connectingDevices: r.connectingDevices,
+          incomingInterface: r.incomingInterface,
+          outgoingInterface: r.outgoingInterface,
+          natAddr: r.natAddr,
+          originalPort: r.originalPort,
+          translatedPort: r.translatedPort,
+          deviceAddr: r.deviceAddr,
+          deviceName: r.deviceName,
+          doubleNat: r.doubleNat,
+          doubleNatAddr: r.doubleNatAddr,
+          comment: r.comment,
+        }));
+        return await applyNftablesConfig(nc, { natRules });
       },
     }),
   }),

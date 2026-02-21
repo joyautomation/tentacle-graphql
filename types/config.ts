@@ -1,3 +1,5 @@
+export type TentacleMode = "dev" | "systemd" | "docker" | "kubernetes";
+
 export interface NatsConfig {
   servers: string;
   user?: string;
@@ -14,12 +16,19 @@ export interface ServerConfig {
 }
 
 export interface Config {
+  mode: TentacleMode;
   nats: NatsConfig;
   server: ServerConfig;
 }
 
+export function getMode(): TentacleMode {
+  return (Deno.env.get("TENTACLE_MODE") || "dev") as TentacleMode;
+}
+
 export function loadConfig(): Config {
+  const mode = (Deno.env.get("TENTACLE_MODE") || "dev") as TentacleMode;
   return {
+    mode,
     nats: {
       servers: Deno.env.get("NATS_SERVERS") || "nats://localhost:4222",
       user: Deno.env.get("NATS_USER"),

@@ -1,21 +1,22 @@
 import { builder } from "./builder.ts";
 import { WatcherManager } from "../nats/watcher.ts";
 import { subscribeToBrowseProgress } from "../nats/client.ts";
-import type { PlcVariableKV, BrowseProgressMessage } from "@tentacle/nats-schema";
-import { BrowseProgressRef } from "./types.ts";
+import { subscribeToServiceLogs } from "../modules/logs.ts";
+import { subscribeToNatsTraffic, type NatsTrafficEntry } from "../modules/nats-traffic.ts";
+import { subscribeToNetworkState } from "../modules/network.ts";
+import { subscribeToNftablesConfig } from "../modules/nftables.ts";
+import type { PlcVariableKV, BrowseProgressMessage, ServiceLogEntry, NetworkStateMessage, NftablesConfig } from "@tentacle/nats-schema";
+import { BrowseProgressRef, LogEntryRef, NatsTrafficEntryRef, NetworkStateRef, NftablesConfigRef } from "./types.ts";
 
 const watcherManager = new WatcherManager();
 
 builder.subscriptionType({
   fields: (t) => ({
-    // Subscribe to all variable updates in a project
+    // Subscribe to all variable updates from all modules
     variableUpdates: t.field({
       type: "Variable",
-      args: {
-        projectId: t.arg.string({ required: true }),
-      },
-      subscribe: async function* (_root: unknown, args: { projectId: string }) {
-        const watcher = await watcherManager.watch(args.projectId);
+      subscribe: async function* () {
+        const watcher = await watcherManager.watch();
 
         try {
           for await (const variable of watcher) {
@@ -32,11 +33,10 @@ builder.subscriptionType({
     variableChanged: t.field({
       type: "Variable",
       args: {
-        projectId: t.arg.string({ required: true }),
         variableId: t.arg.string({ required: true }),
       },
-      subscribe: async function* (_root: unknown, args: { projectId: string; variableId: string }) {
-        const watcher = await watcherManager.watch(args.projectId, {
+      subscribe: async function* (_root: unknown, args: { variableId: string }) {
+        const watcher = await watcherManager.watch({
           variableIds: [args.variableId],
         });
 
@@ -52,7 +52,6 @@ builder.subscriptionType({
     }),
 
     // Subscribe to browse progress updates
-    // Use after calling browseTags mutation with async: true
     browseProgress: t.field({
       type: BrowseProgressRef,
       args: {
@@ -66,6 +65,56 @@ builder.subscriptionType({
         }
       },
       resolve: (progress: BrowseProgressMessage) => progress,
+    }),
+
+    // Subscribe to real-time service log entries
+    serviceLogs: t.field({
+      type: LogEntryRef,
+      args: {
+        serviceType: t.arg.string({ required: true }),
+      },
+      subscribe: async function* (_root: unknown, args: { serviceType: string }) {
+        for await (const entry of subscribeToServiceLogs(args.serviceType)) {
+          yield entry;
+        }
+      },
+      resolve: (entry: ServiceLogEntry) => entry,
+    }),
+
+    // Subscribe to real-time NATS traffic
+    natsTraffic: t.field({
+      type: NatsTrafficEntryRef,
+      args: {
+        filter: t.arg.string({ required: false }),
+      },
+      subscribe: async function* (_root: unknown, args: { filter?: string | null }) {
+        for await (const entry of subscribeToNatsTraffic(args.filter ?? undefined)) {
+          yield entry;
+        }
+      },
+      resolve: (entry: NatsTrafficEntry) => entry,
+    }),
+
+    // Subscribe to real-time network interface state updates
+    networkState: t.field({
+      type: NetworkStateRef,
+      subscribe: async function* () {
+        for await (const state of subscribeToNetworkState()) {
+          yield state;
+        }
+      },
+      resolve: (state: NetworkStateMessage) => state,
+    }),
+
+    // Subscribe to real-time nftables config updates
+    nftablesConfig: t.field({
+      type: NftablesConfigRef,
+      subscribe: async function* () {
+        for await (const config of subscribeToNftablesConfig()) {
+          yield config;
+        }
+      },
+      resolve: (config: NftablesConfig) => config,
     }),
   }),
 });

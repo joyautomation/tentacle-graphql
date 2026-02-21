@@ -1,46 +1,35 @@
 import SchemaBuilder from "@pothos/core";
-import type { PlcVariableKV, ServiceHeartbeat } from "@tentacle/nats-schema";
-
-// Project info type (must match ProjectInfo from nats/client.ts)
-export interface ProjectConfig {
-  id: string;
-  lastActivity: number | null;
-  isConnected: boolean;
-  variableCount: number;
-  services: ServiceHeartbeat[];
-}
-
-// Device configuration type for EtherNet/IP PLCs
-export interface DeviceConfig {
-  id: string;
-  projectId: string;
-  host: string;
-  port: number;
-  type: "rockwell" | "generic-cip";
-  slot?: number;
-  scanRate: number;
-  enabled: boolean;
-}
-
-// Tag configuration type
-export interface TagConfig {
-  id: string;
-  deviceId: string;
-  address: string;
-  datatype?: string;
-  writable: boolean;
-  deadbandValue?: number;
-  deadbandMaxTime?: number;
-  disableRBE?: boolean;
-}
+import type {
+  PlcVariableKV,
+  ServiceHeartbeat,
+  ServiceLogEntry,
+  NetworkInterfaceStats,
+  NetworkAddress,
+  NetworkInterface,
+  NetworkStateMessage,
+  NetworkInterfaceConfig,
+  NetworkCommandResponse,
+  NatRule,
+  NftablesConfig,
+  NftablesCommandResponse,
+} from "@tentacle/nats-schema";
+import type { NatsTrafficEntry } from "../modules/nats-traffic.ts";
 
 export const builder = new SchemaBuilder<{
   Objects: {
-    Project: ProjectConfig;
     Variable: PlcVariableKV;
-    Device: DeviceConfig;
-    Tag: TagConfig;
     Service: ServiceHeartbeat;
+    LogEntry: ServiceLogEntry;
+    NatsTrafficEntry: NatsTrafficEntry;
+    NetworkInterfaceStats: NetworkInterfaceStats;
+    NetworkAddress: NetworkAddress;
+    NetworkInterface: NetworkInterface;
+    NetworkState: NetworkStateMessage;
+    NetworkInterfaceConfig: NetworkInterfaceConfig;
+    NetworkCommandResult: NetworkCommandResponse;
+    NatRule: NatRule;
+    NftablesConfig: NftablesConfig;
+    NftablesCommandResult: NftablesCommandResponse;
   };
   Scalars: {
     JSON: { Input: unknown; Output: unknown };

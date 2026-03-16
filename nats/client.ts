@@ -116,8 +116,9 @@ function normalizeVariable(
   data: Record<string, unknown>,
   variableId: string,
 ): PlcVariableKV {
-  return {
+  const result: PlcVariableKV & { cipType?: string; udtType?: string } = {
     moduleId: (data.moduleId as string) || "unknown",
+    deviceId: data.deviceId as string | undefined,
     variableId: (data.variableId as string) || variableId,
     value: "value" in data && data.value !== null ? (data.value as string | number | boolean | Record<string, unknown>) : 0,
     datatype: (data.datatype as PlcVariableKV["datatype"]) || "number",
@@ -128,6 +129,14 @@ function normalizeVariable(
     deadband: data.deadband as PlcVariableKV["deadband"],
     disableRBE: data.disableRBE as boolean | undefined,
   };
+  if (data.cipType) result.cipType = data.cipType as string;
+  // UDT type name — from EIP scanner's structType field, or from tentacle-plc's udtTemplate
+  if (data.structType) {
+    result.udtType = data.structType as string;
+  } else if (data.udtTemplate && typeof data.udtTemplate === "object") {
+    result.udtType = (data.udtTemplate as { name?: string }).name;
+  }
+  return result;
 }
 
 /**
@@ -149,13 +158,39 @@ export async function getVariable(
  * Sends a request to tentacle-ethernetip which responds with current poll list
  */
 export async function listVariables(moduleId?: string): Promise<PlcVariableKV[]> {
-  try {
-    const nc = getNatsConnection();
-    // Request from a specific module or default to ethernetip
-    const targetModule = moduleId || "ethernetip";
-    const subject = substituteTopic(NATS_TOPICS.module.variables, { moduleId: targetModule });
+  const nc = getNatsConnection();
 
-    // Request variables from the module with 5 second timeout
+  if (moduleId) {
+    // Query a specific module
+    return await requestModuleVariables(nc, moduleId);
+  }
+
+  // No moduleId specified — query all PLC-type services for their variables
+  const heartbeats = await getAllHeartbeats();
+  const plcModules = heartbeats.filter(h => h.serviceType === "plc");
+
+  if (plcModules.length === 0) {
+    // Fallback: try ethernetip directly
+    return await requestModuleVariables(nc, "ethernetip");
+  }
+
+  // Query all PLC modules in parallel and merge results
+  const results = await Promise.allSettled(
+    plcModules.map(h => requestModuleVariables(nc, h.moduleId))
+  );
+
+  const allVars: PlcVariableKV[] = [];
+  for (const result of results) {
+    if (result.status === "fulfilled") {
+      allVars.push(...result.value);
+    }
+  }
+  return allVars;
+}
+
+async function requestModuleVariables(nc: NatsConnection, moduleId: string): Promise<PlcVariableKV[]> {
+  try {
+    const subject = substituteTopic(NATS_TOPICS.module.variables, { moduleId });
     const response = await nc.request(subject, new Uint8Array(0), { timeout: 5000 });
 
     if (response.data && response.data.length > 0) {
@@ -164,21 +199,23 @@ export async function listVariables(moduleId?: string): Promise<PlcVariableKV[]>
         normalizeVariable(v, v.variableId as string)
       );
     }
-
     return [];
   } catch (error) {
-    log.debug(`No response for variables request:`, error);
+    log.debug(`No response for variables from ${moduleId}:`, error);
     return [];
   }
 }
 
 /**
- * Subscribe to variable updates from all modules using pub/sub
- * Subscribes to *.data.> for real-time streaming from all modules
+ * Subscribe to variable updates using pub/sub.
+ * When moduleId is provided, subscribes to {moduleId}.data.> for that module only.
+ * Otherwise subscribes to *.data.> for all modules.
  */
-export async function subscribeToVariableUpdates(): Promise<AsyncIterable<PlcVariableKV>> {
+export async function subscribeToVariableUpdates(moduleId?: string): Promise<AsyncIterable<PlcVariableKV>> {
   const nc = getNatsConnection();
-  const subject = NATS_SUBSCRIPTIONS.allData();
+  const subject = moduleId
+    ? NATS_SUBSCRIPTIONS.allModuleData(moduleId)
+    : NATS_SUBSCRIPTIONS.allData();
 
   const sub = nc.subscribe(subject);
 

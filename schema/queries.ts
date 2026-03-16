@@ -6,11 +6,12 @@ import {
   getNatsConnection,
 } from "../nats/client.ts";
 import { getRecentLogs } from "../modules/logs.ts";
-import { LogEntryRef, NatsTrafficEntryRef, NetworkStateRef, NetworkInterfaceConfigRef, NftablesConfigRef } from "./types.ts";
+import { LogEntryRef, NatsTrafficEntryRef, NetworkStateRef, NetworkInterfaceConfigRef, NftablesConfigRef, MqttMetricsResponseRef } from "./types.ts";
 import { getMode } from "../types/config.ts";
 import { getRecentTraffic } from "../modules/nats-traffic.ts";
 import { requestNetworkState, requestNetworkConfig } from "../modules/network.ts";
 import { requestNftablesConfig } from "../modules/nftables.ts";
+import { requestMqttMetrics } from "../modules/mqtt.ts";
 
 builder.queryType({
   fields: (t) => ({
@@ -116,6 +117,21 @@ builder.queryType({
           return await requestNftablesConfig(nc);
         } catch {
           return { natRules: [] };
+        }
+      },
+    }),
+
+    // Get current MQTT metrics and templates
+    mqttMetrics: t.field({
+      type: MqttMetricsResponseRef,
+      description: "Get current MQTT Sparkplug B metrics and template definitions from tentacle-mqtt",
+      resolve: async () => {
+        try {
+          const nc = getNatsConnection();
+          return await requestMqttMetrics(nc);
+        } catch (err) {
+          console.error("mqttMetrics error:", err);
+          return { metrics: [], templates: [], deviceId: "", timestamp: Date.now() };
         }
       },
     }),

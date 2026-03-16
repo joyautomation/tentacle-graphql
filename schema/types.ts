@@ -52,6 +52,18 @@ builder.objectType("Variable", {
       resolve: (v) => v.value,
     }),
     datatype: t.exposeString("datatype"),
+    cipType: t.field({
+      type: "String",
+      nullable: true,
+      description: "CIP type for EtherNet/IP tags (e.g. DINT, REAL, STRING)",
+      resolve: (v) => (v as Record<string, unknown>).cipType as string | null ?? null,
+    }),
+    udtType: t.field({
+      type: "String",
+      nullable: true,
+      description: "UDT template type name (e.g. Analog_Input, LevelControl_Pump)",
+      resolve: (v) => (v as Record<string, unknown>).udtType as string | null ?? null,
+    }),
     lastUpdated: t.field({
       type: "DateTime",
       resolve: (v) => new Date(v.lastUpdated),
@@ -357,6 +369,75 @@ const NatRuleInputRef = builder.inputType("NatRuleInput", {
   }),
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// MQTT Metrics Types
+// ═══════════════════════════════════════════════════════════════════════════
+
+import type { MqttMetricInfo, MqttTemplateInfo, MqttMetricsResponse, UdtMemberDefinition } from "@tentacle/nats-schema";
+
+const MqttMetricInfoRef = builder.objectRef<MqttMetricInfo & { timestamp?: number | null }>("MqttMetricInfo");
+builder.objectType(MqttMetricInfoRef, {
+  fields: (t) => ({
+    name: t.exposeString("name"),
+    sparkplugType: t.exposeString("sparkplugType"),
+    value: t.field({
+      type: "JSON",
+      nullable: true,
+      resolve: (m) => m.value,
+    }),
+    moduleId: t.exposeString("moduleId"),
+    datatype: t.exposeString("datatype"),
+    templateRef: t.exposeString("templateRef", { nullable: true }),
+    timestamp: t.field({
+      type: "Float",
+      nullable: true,
+      resolve: (m) => (m as MqttMetricInfo & { timestamp?: number | null }).timestamp ?? null,
+    }),
+  }),
+});
+
+const MqttTemplateMemberRef = builder.objectRef<UdtMemberDefinition>("MqttTemplateMember");
+builder.objectType(MqttTemplateMemberRef, {
+  fields: (t) => ({
+    name: t.exposeString("name"),
+    datatype: t.exposeString("datatype"),
+    description: t.exposeString("description", { nullable: true }),
+    templateRef: t.exposeString("templateRef", { nullable: true }),
+    isArray: t.exposeBoolean("isArray", { nullable: true }),
+  }),
+});
+
+const MqttTemplateInfoRef = builder.objectRef<MqttTemplateInfo>("MqttTemplateInfo");
+builder.objectType(MqttTemplateInfoRef, {
+  fields: (t) => ({
+    name: t.exposeString("name"),
+    version: t.exposeString("version", { nullable: true }),
+    members: t.field({
+      type: [MqttTemplateMemberRef],
+      resolve: (tmpl) => tmpl.members,
+    }),
+  }),
+});
+
+const MqttMetricsResponseRef = builder.objectRef<MqttMetricsResponse>("MqttMetricsResponse");
+builder.objectType(MqttMetricsResponseRef, {
+  fields: (t) => ({
+    metrics: t.field({
+      type: [MqttMetricInfoRef],
+      resolve: (r) => r.metrics,
+    }),
+    templates: t.field({
+      type: [MqttTemplateInfoRef],
+      resolve: (r) => r.templates,
+    }),
+    deviceId: t.exposeString("deviceId"),
+    timestamp: t.field({
+      type: "DateTime",
+      resolve: (r) => new Date(r.timestamp),
+    }),
+  }),
+});
+
 export {
   LogEntryRef,
   NatsTrafficEntryRef,
@@ -367,4 +448,5 @@ export {
   NftablesConfigRef,
   NftablesCommandResultRef,
   NatRuleInputRef,
+  MqttMetricsResponseRef,
 };

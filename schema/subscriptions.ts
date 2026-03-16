@@ -12,11 +12,16 @@ const watcherManager = new WatcherManager();
 
 builder.subscriptionType({
   fields: (t) => ({
-    // Subscribe to all variable updates from all modules
+    // Subscribe to variable updates, optionally filtered by moduleId
     variableUpdates: t.field({
       type: "Variable",
-      subscribe: async function* () {
-        const watcher = await watcherManager.watch();
+      args: {
+        moduleId: t.arg.string({ required: false }),
+      },
+      subscribe: async function* (_root: unknown, args: { moduleId?: string | null }) {
+        const watcher = await watcherManager.watch({
+          moduleId: args.moduleId ?? undefined,
+        });
 
         try {
           for await (const variable of watcher) {
@@ -27,6 +32,28 @@ builder.subscriptionType({
         }
       },
       resolve: (variable: PlcVariableKV) => variable,
+    }),
+
+    // Subscribe to batched variable updates — emits all changed variables every 2.5s
+    variableBatchUpdates: t.field({
+      type: ["Variable"],
+      args: {
+        moduleId: t.arg.string({ required: false }),
+      },
+      subscribe: async function* (_root: unknown, args: { moduleId?: string | null }) {
+        const watcher = await watcherManager.watchBatched({
+          moduleId: args.moduleId ?? undefined,
+        });
+
+        try {
+          for await (const batch of watcher) {
+            yield batch;
+          }
+        } finally {
+          await watcher.close();
+        }
+      },
+      resolve: (batch: PlcVariableKV[]) => batch,
     }),
 
     // Subscribe to updates for a specific variable

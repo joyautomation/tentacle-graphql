@@ -6,23 +6,25 @@ on:
       - 'v*.*.*'
 
 jobs:
-  package:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          path: tentacle-graphql
 
-      - name: Package source
-        run: tar czf tentacle-graphql-src.tar.gz --exclude='.git' tentacle-graphql/
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: Compile binary
+        run: deno compile --allow-all --target x86_64-unknown-linux-gnu --output tentacle-graphql main.ts
 
       - uses: actions/upload-artifact@v4
         with:
-          name: tentacle-graphql-src
-          path: tentacle-graphql-src.tar.gz
+          name: tentacle-graphql-linux-amd64
+          path: tentacle-graphql
 
   release:
-    needs: package
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write

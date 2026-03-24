@@ -3,15 +3,20 @@ import {
   listVariables,
   getVariable,
   getAllHeartbeats,
+  getAllServiceEnabled,
   getNatsConnection,
 } from "../nats/client.ts";
 import { getRecentLogs } from "../modules/logs.ts";
-import { LogEntryRef, NatsTrafficEntryRef, NetworkStateRef, NetworkInterfaceConfigRef, NftablesConfigRef, MqttMetricsResponseRef } from "./types.ts";
+import { ConfigEntryRef, LogEntryRef, NatsTrafficEntryRef, NetworkStateRef, NetworkInterfaceConfigRef, NftablesConfigRef, MqttMetricsResponseRef, VariableHistoryRef, VariableHistoryInputRef, UsageStatsRef, StoreForwardStatusRef, GatewayConfigRef } from "./types.ts";
 import { getMode } from "../types/config.ts";
 import { getRecentTraffic } from "../modules/nats-traffic.ts";
 import { requestNetworkState, requestNetworkConfig } from "../modules/network.ts";
 import { requestNftablesConfig } from "../modules/nftables.ts";
 import { requestMqttMetrics } from "../modules/mqtt.ts";
+import { getHistory, getUsage, getHistoryPool } from "../modules/history.ts";
+import { requestStoreForwardStatus } from "../modules/store-forward.ts";
+import { getServiceConfig, getAllConfig } from "../modules/service-config.ts";
+import { getGatewayConfig, listGatewayConfigs } from "../modules/gateway.ts";
 
 builder.queryType({
   fields: (t) => ({
@@ -75,7 +80,15 @@ builder.queryType({
       type: ["Service"],
       description: "List active tentacle services.",
       resolve: async () => {
-        return await getAllHeartbeats();
+        const [heartbeats, enabledMap] = await Promise.all([
+          getAllHeartbeats(),
+          getAllServiceEnabled(),
+        ]);
+        // Merge enabled state into heartbeats for batch resolution
+        return heartbeats.map((hb) => ({
+          ...hb,
+          _enabled: enabledMap.has(hb.moduleId) ? enabledMap.get(hb.moduleId) : true,
+        }));
       },
     }),
 
@@ -133,6 +146,129 @@ builder.queryType({
           console.error("mqttMetrics error:", err);
           return { metrics: [], templates: [], deviceId: "", timestamp: Date.now() };
         }
+      },
+    }),
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // History Queries
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // Query historical variable data with optional downsampling
+    history: t.field({
+      type: [VariableHistoryRef],
+      description: "Query historical variable data with time-bucketed aggregation",
+      args: {
+        start: t.arg({ type: "DateTime", required: true }),
+        end: t.arg({ type: "DateTime", required: true }),
+        variables: t.arg({ type: [VariableHistoryInputRef], required: true }),
+        interval: t.arg.string({ required: false, description: "Time bucket interval (e.g., '1m', '1h'). Auto-calculated if omitted." }),
+        samples: t.arg.int({ required: false, description: "Target number of data points (default 100). Used to auto-calculate interval." }),
+        raw: t.arg.boolean({ required: false, description: "If true, return raw points without aggregation" }),
+      },
+      resolve: async (_root, args) => {
+        if (!getHistoryPool()) {
+          return [];
+        }
+        try {
+          return await getHistory({
+            variables: args.variables.map((v) => ({ moduleId: v.moduleId, variableId: v.variableId })),
+            start: new Date(args.start),
+            end: new Date(args.end),
+            interval: args.interval,
+            samples: args.samples,
+            raw: args.raw,
+          });
+        } catch (err) {
+          console.error("history query error:", err);
+          return [];
+        }
+      },
+    }),
+
+    // History usage statistics
+    historyUsage: t.field({
+      type: UsageStatsRef,
+      nullable: true,
+      description: "Get history storage usage statistics",
+      resolve: async () => {
+        if (!getHistoryPool()) return null;
+        try {
+          return await getUsage();
+        } catch (err) {
+          console.error("historyUsage error:", err);
+          return null;
+        }
+      },
+    }),
+
+    // Whether history is available
+    historyEnabled: t.field({
+      type: "Boolean",
+      description: "Whether the history database is configured and available",
+      resolve: () => getHistoryPool() !== null,
+    }),
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Store & Forward
+    // ═══════════════════════════════════════════════════════════════════════
+
+    storeForwardStatus: t.field({
+      type: StoreForwardStatusRef,
+      nullable: true,
+      description: "Get MQTT Store & Forward buffer status, including primary host state and drain progress",
+      resolve: async () => {
+        try {
+          const nc = getNatsConnection();
+          return await requestStoreForwardStatus(nc);
+        } catch {
+          return null;
+        }
+      },
+    }),
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Service Configuration
+    // ═══════════════════════════════════════════════════════════════════════
+
+    serviceConfig: t.field({
+      type: [ConfigEntryRef],
+      description: "Get all config entries for a service module from NATS KV",
+      args: {
+        moduleId: t.arg.string({ required: true }),
+      },
+      resolve: async (_root, args) => {
+        return await getServiceConfig(args.moduleId);
+      },
+    }),
+
+    allConfig: t.field({
+      type: [ConfigEntryRef],
+      description: "Get all config entries across all service modules",
+      resolve: async () => {
+        return await getAllConfig();
+      },
+    }),
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Gateway Configuration
+    // ═══════════════════════════════════════════════════════════════════════
+
+    gatewayConfig: t.field({
+      type: GatewayConfigRef,
+      description: "Get the full gateway configuration (devices + variables) for a gateway instance",
+      args: {
+        gatewayId: t.arg.string({ required: true }),
+      },
+      resolve: async (_root, args) => {
+        return await getGatewayConfig(args.gatewayId);
+      },
+    }),
+
+    gatewayConfigs: t.field({
+      type: [GatewayConfigRef],
+      description: "List all gateway configurations",
+      resolve: async () => {
+        return await listGatewayConfigs();
       },
     }),
   }),

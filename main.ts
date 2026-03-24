@@ -6,6 +6,9 @@ import { initLogCollector } from "./modules/logs.ts";
 import { initNatsTrafficCollector } from "./modules/nats-traffic.ts";
 import { initNetworkCollector } from "./modules/network.ts";
 import { initNftablesCollector } from "./modules/nftables.ts";
+import { initHistoryDb } from "./modules/history.ts";
+import { initConfigKv } from "./modules/service-config.ts";
+import { initGatewayKv } from "./modules/gateway.ts";
 import type { ServiceLogEntry } from "@tentacle/nats-schema";
 
 let log: Log = createLogger("graphql-main", LogLevel.info);
@@ -68,6 +71,15 @@ async function main() {
 
   // Initialize nftables config collector (subscribes to nftables.rules)
   initNftablesCollector(nc);
+
+  // Initialize config KV for service configuration queries
+  await initConfigKv(nc);
+
+  // Initialize gateway config KV
+  await initGatewayKv(nc);
+
+  // Initialize history database (optional — only if TENTACLE_DB_HOST is set)
+  initHistoryDb();
 
   // Create and start GraphQL server
   log.info(`Creating GraphQL server on ${config.server.hostname}:${config.server.port}...`);

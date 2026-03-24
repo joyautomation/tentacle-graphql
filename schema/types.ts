@@ -1,8 +1,12 @@
 import { builder } from "./builder.ts";
 import type { PlcVariableKV, DeadBandConfig, ServiceHeartbeat, BrowseProgressMessage } from "@tentacle/nats-schema";
+import { getServiceEnabled } from "../nats/client.ts";
+
+// Extended heartbeat with enabled state for GraphQL resolution
+type ServiceWithEnabled = ServiceHeartbeat & { _enabled?: boolean };
 
 // Service object type (represents a tentacle service instance)
-const ServiceRef = builder.objectRef<ServiceHeartbeat>("Service");
+const ServiceRef = builder.objectRef<ServiceWithEnabled>("Service");
 builder.objectType(ServiceRef, {
   fields: (t) => ({
     serviceType: t.exposeString("serviceType"),
@@ -25,6 +29,15 @@ builder.objectType(ServiceRef, {
       type: "JSON",
       nullable: true,
       resolve: (s) => s.metadata || null,
+    }),
+    enabled: t.field({
+      type: "Boolean",
+      description: "Whether the service is enabled and actively performing work",
+      resolve: async (s) => {
+        // Use pre-fetched value if available (from batch query)
+        if (s._enabled !== undefined) return s._enabled;
+        return await getServiceEnabled(s.moduleId);
+      },
     }),
   }),
 });
@@ -438,7 +451,246 @@ builder.objectType(MqttMetricsResponseRef, {
   }),
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// History Types
+// ═══════════════════════════════════════════════════════════════════════════
+
+import type { HistoryPoint, VariableHistory } from "../modules/history.ts";
+
+const HistoryPointRef = builder.objectRef<HistoryPoint>("HistoryPoint");
+builder.objectType(HistoryPointRef, {
+  fields: (t) => ({
+    value: t.exposeString("value", { nullable: true }),
+    timestamp: t.field({
+      type: "DateTime",
+      resolve: (p) => new Date(p.timestamp),
+    }),
+  }),
+});
+
+const VariableHistoryRef = builder.objectRef<VariableHistory>("VariableHistory");
+builder.objectType(VariableHistoryRef, {
+  fields: (t) => ({
+    moduleId: t.exposeString("moduleId"),
+    variableId: t.exposeString("variableId"),
+    history: t.field({
+      type: [HistoryPointRef],
+      resolve: (h) => h.history,
+    }),
+  }),
+});
+
+const VariableHistoryInputRef = builder.inputType("VariableHistoryInput", {
+  fields: (t) => ({
+    moduleId: t.string({ required: true }),
+    variableId: t.string({ required: true }),
+  }),
+});
+
+type UsageMonth = { year: number; month: number; count: number };
+type UsageStats = { totalCount: number; byMonth: UsageMonth[] };
+
+const UsageMonthRef = builder.objectRef<UsageMonth>("UsageMonth");
+builder.objectType(UsageMonthRef, {
+  fields: (t) => ({
+    year: t.exposeInt("year"),
+    month: t.exposeInt("month"),
+    count: t.exposeInt("count"),
+  }),
+});
+
+const UsageStatsRef = builder.objectRef<UsageStats>("UsageStats");
+builder.objectType(UsageStatsRef, {
+  fields: (t) => ({
+    totalCount: t.exposeInt("totalCount"),
+    byMonth: t.field({
+      type: [UsageMonthRef],
+      resolve: (u) => u.byMonth,
+    }),
+  }),
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Store & Forward Types
+// ═══════════════════════════════════════════════════════════════════════════
+
+import type { StoreForwardStatus } from "../modules/store-forward.ts";
+
+type TimelinePoint = { timestamp: number; state: string };
+
+const TimelinePointRef = builder.objectRef<TimelinePoint>("TimelinePoint");
+builder.objectType(TimelinePointRef, {
+  fields: (t) => ({
+    timestamp: t.field({ type: "DateTime", resolve: (p) => new Date(p.timestamp) }),
+    state: t.exposeString("state"),
+  }),
+});
+
+const StoreForwardStatusRef = builder.objectRef<StoreForwardStatus>("StoreForwardStatus");
+builder.objectType(StoreForwardStatusRef, {
+  fields: (t) => ({
+    primaryHostId: t.exposeString("primaryHostId", { nullable: true }),
+    primaryHostOnline: t.exposeBoolean("primaryHostOnline"),
+    bufferedRecords: t.exposeInt("bufferedRecords"),
+    bufferSizeBytes: t.exposeInt("bufferSizeBytes"),
+    bufferCapacityRecords: t.exposeInt("bufferCapacityRecords"),
+    bufferCapacityBytes: t.exposeInt("bufferCapacityBytes"),
+    bufferUsedPercentRecords: t.exposeFloat("bufferUsedPercentRecords"),
+    bufferUsedPercentBytes: t.exposeFloat("bufferUsedPercentBytes"),
+    draining: t.exposeBoolean("draining"),
+    drainProgress: t.exposeFloat("drainProgress"),
+    drainRecordsRemaining: t.exposeInt("drainRecordsRemaining"),
+    drainTotalRecords: t.exposeInt("drainTotalRecords"),
+    drainEtaSeconds: t.exposeFloat("drainEtaSeconds"),
+    drainStartedAt: t.field({
+      type: "DateTime",
+      nullable: true,
+      resolve: (s) => s.drainStartedAt ? new Date(s.drainStartedAt) : null,
+    }),
+    totalBuffered: t.exposeInt("totalBuffered"),
+    totalDrained: t.exposeInt("totalDrained"),
+    totalEvicted: t.exposeInt("totalEvicted"),
+    publishRate: t.exposeFloat("publishRate"),
+    timeline: t.field({
+      type: [TimelinePointRef],
+      resolve: (s) => s.timeline,
+    }),
+  }),
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Service Config Types
+// ═══════════════════════════════════════════════════════════════════════════
+
+import type { ConfigEntry } from "../modules/service-config.ts";
+
+const ConfigEntryRef = builder.objectRef<ConfigEntry>("ConfigEntry");
+builder.objectType(ConfigEntryRef, {
+  fields: (t) => ({
+    key: t.exposeString("key"),
+    envVar: t.exposeString("envVar"),
+    value: t.exposeString("value"),
+    moduleId: t.exposeString("moduleId"),
+  }),
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Gateway Config Types
+// ═══════════════════════════════════════════════════════════════════════════
+
+import type {
+  GatewayConfigKV,
+  GatewayDeviceConfig,
+  GatewayVariableConfig,
+} from "@tentacle/nats-schema";
+
+// Object types for gateway device configs (union via protocol field)
+const GatewayDeviceRef = builder.objectRef<GatewayDeviceConfig & { _deviceId?: string }>("GatewayDevice");
+builder.objectType(GatewayDeviceRef, {
+  fields: (t) => ({
+    deviceId: t.field({
+      type: "String",
+      resolve: (d) => d._deviceId ?? "",
+    }),
+    protocol: t.exposeString("protocol"),
+    config: t.field({
+      type: "JSON",
+      description: "Protocol-specific connection config",
+      resolve: (d) => {
+        const { _deviceId: _, protocol: __, ...rest } = d as Record<string, unknown>;
+        return rest;
+      },
+    }),
+  }),
+});
+
+const GatewayVariableRef = builder.objectRef<GatewayVariableConfig>("GatewayVariable");
+builder.objectType(GatewayVariableRef, {
+  fields: (t) => ({
+    id: t.exposeString("id"),
+    description: t.exposeString("description", { nullable: true }),
+    datatype: t.exposeString("datatype"),
+    default: t.field({
+      type: "JSON",
+      resolve: (v) => v.default,
+    }),
+    deviceId: t.exposeString("deviceId"),
+    tag: t.exposeString("tag"),
+    bidirectional: t.exposeBoolean("bidirectional", { nullable: true }),
+    deadband: t.field({
+      type: DeadBandConfigType,
+      nullable: true,
+      resolve: (v) => v.deadband || null,
+    }),
+    disableRBE: t.exposeBoolean("disableRBE", { nullable: true }),
+  }),
+});
+
+const GatewayConfigRef = builder.objectRef<GatewayConfigKV>("GatewayConfig");
+builder.objectType(GatewayConfigRef, {
+  fields: (t) => ({
+    gatewayId: t.exposeString("gatewayId"),
+    devices: t.field({
+      type: [GatewayDeviceRef],
+      resolve: (c) =>
+        Object.entries(c.devices).map(([id, dev]) => ({
+          ...dev,
+          _deviceId: id,
+        })),
+    }),
+    variables: t.field({
+      type: [GatewayVariableRef],
+      resolve: (c) => Object.values(c.variables),
+    }),
+    updatedAt: t.field({
+      type: "DateTime",
+      resolve: (c) => new Date(c.updatedAt),
+    }),
+  }),
+});
+
+// Input types for gateway mutations
+const GatewayDeviceInputRef = builder.inputType("GatewayDeviceInput", {
+  fields: (t) => ({
+    deviceId: t.string({ required: true }),
+    protocol: t.string({ required: true }),
+    host: t.string({ required: false }),
+    port: t.int({ required: false }),
+    endpointUrl: t.string({ required: false }),
+    version: t.string({ required: false }),
+    community: t.string({ required: false }),
+    unitId: t.int({ required: false }),
+  }),
+});
+
+const DeadBandConfigInputRef = builder.inputType("DeadBandConfigInput", {
+  fields: (t) => ({
+    value: t.float({ required: true }),
+    minTime: t.int({ required: false }),
+    maxTime: t.int({ required: false }),
+  }),
+});
+
+const GatewayVariableInputRef = builder.inputType("GatewayVariableInput", {
+  fields: (t) => ({
+    id: t.string({ required: true }),
+    description: t.string({ required: false }),
+    datatype: t.string({ required: true }),
+    default: t.field({ type: "JSON", required: false }),
+    deviceId: t.string({ required: true }),
+    tag: t.string({ required: true }),
+    bidirectional: t.boolean({ required: false }),
+    deadband: t.field({ type: DeadBandConfigInputRef, required: false }),
+    disableRBE: t.boolean({ required: false }),
+    functionCode: t.int({ required: false }),
+    modbusDatatype: t.string({ required: false }),
+    byteOrder: t.string({ required: false }),
+    address: t.int({ required: false }),
+  }),
+});
+
 export {
+  ConfigEntryRef,
   LogEntryRef,
   NatsTrafficEntryRef,
   NetworkStateRef,
@@ -449,4 +701,11 @@ export {
   NftablesCommandResultRef,
   NatRuleInputRef,
   MqttMetricsResponseRef,
+  VariableHistoryRef,
+  VariableHistoryInputRef,
+  UsageStatsRef,
+  StoreForwardStatusRef,
+  GatewayConfigRef,
+  GatewayDeviceInputRef,
+  GatewayVariableInputRef,
 };

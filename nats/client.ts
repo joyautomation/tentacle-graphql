@@ -2,7 +2,7 @@ import { connect, type NatsConnection } from "@nats-io/transport-deno";
 import { jetstream, type JetStreamClient } from "@nats-io/jetstream";
 import { Kvm, type KV } from "@nats-io/kv";
 import { createLogger, LogLevel } from "@joyautomation/coral";
-import type { PlcVariableKV, ServiceHeartbeat, BrowseProgressMessage } from "@tentacle/nats-schema";
+import type { PlcVariableKV, ServiceHeartbeat, ServiceEnabledKV, BrowseProgressMessage } from "@tentacle/nats-schema";
 import { NATS_TOPICS, NATS_SUBSCRIPTIONS, substituteTopic, isBrowseProgressMessage } from "@tentacle/nats-schema";
 import type { NatsConfig } from "../types/config.ts";
 
@@ -11,6 +11,7 @@ const log = createLogger("graphql-nats", LogLevel.info);
 let connection: NatsConnection | null = null;
 let jsClient: JetStreamClient | null = null;
 let heartbeatsKv: KV | null = null;
+let serviceEnabledKv: KV | null = null;
 
 export async function connectToNats(config: NatsConfig): Promise<void> {
   if (connection) {
@@ -26,11 +27,16 @@ export async function connectToNats(config: NatsConfig): Promise<void> {
 
   jsClient = jetstream(connection);
 
-  // Initialize heartbeats KV bucket (or create if doesn't exist)
+  // Initialize KV buckets (or create if they don't exist)
   const kvm = new Kvm(jsClient);
   heartbeatsKv = await kvm.create("service_heartbeats", {
     history: 1,
     ttl: 60 * 1000, // 1 minute TTL
+  });
+
+  serviceEnabledKv = await kvm.create("service_enabled", {
+    history: 1,
+    ttl: 0, // No expiration — persists until explicitly changed
   });
 
   log.info(`Connected to NATS at ${config.servers}`);
@@ -97,6 +103,75 @@ export async function getHeartbeat(moduleId: string): Promise<ServiceHeartbeat |
     // Entry may have expired or doesn't exist
   }
   return null;
+}
+
+/**
+ * Get the enabled state for a specific module.
+ * Returns true if no explicit state is set (enabled by default).
+ */
+export async function getServiceEnabled(moduleId: string): Promise<boolean> {
+  if (!serviceEnabledKv) return true;
+
+  const decoder = new TextDecoder();
+  try {
+    const entry = await serviceEnabledKv.get(moduleId);
+    if (entry?.value) {
+      const state = JSON.parse(decoder.decode(entry.value)) as ServiceEnabledKV;
+      return state.enabled;
+    }
+  } catch {
+    // Key doesn't exist = enabled by default
+  }
+  return true;
+}
+
+/**
+ * Get enabled state for all modules that have an explicit entry.
+ * Returns a map of moduleId → enabled.
+ */
+export async function getAllServiceEnabled(): Promise<Map<string, boolean>> {
+  const result = new Map<string, boolean>();
+  if (!serviceEnabledKv) return result;
+
+  const decoder = new TextDecoder();
+  try {
+    const keys = await serviceEnabledKv.keys();
+    for await (const key of keys) {
+      try {
+        const entry = await serviceEnabledKv.get(key);
+        if (entry?.value) {
+          const state = JSON.parse(decoder.decode(entry.value)) as ServiceEnabledKV;
+          result.set(state.moduleId, state.enabled);
+        }
+      } catch {
+        // Entry may have been deleted
+      }
+    }
+  } catch {
+    // KV bucket may not exist yet
+  }
+  return result;
+}
+
+/**
+ * Set the enabled state for a service module.
+ */
+export async function setServiceEnabled(moduleId: string, enabled: boolean): Promise<ServiceEnabledKV> {
+  if (!serviceEnabledKv) {
+    throw new Error("Service enabled KV not initialized. NATS not connected.");
+  }
+
+  const state: ServiceEnabledKV = {
+    moduleId,
+    enabled,
+    updatedAt: Date.now(),
+  };
+
+  const encoder = new TextEncoder();
+  await serviceEnabledKv.put(moduleId, encoder.encode(JSON.stringify(state)));
+  log.info(`Set service ${moduleId} enabled=${enabled}`);
+
+  return state;
 }
 
 /**

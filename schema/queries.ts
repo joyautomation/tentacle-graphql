@@ -5,9 +5,11 @@ import {
   getAllHeartbeats,
   getAllServiceEnabled,
   getNatsConnection,
+  getAllDesiredServices,
+  getAllServiceStatuses,
 } from "../nats/client.ts";
 import { getRecentLogs } from "../modules/logs.ts";
-import { ConfigEntryRef, LogEntryRef, NatsTrafficEntryRef, NetworkStateRef, NetworkInterfaceConfigRef, NftablesConfigRef, MqttMetricsResponseRef, VariableHistoryRef, VariableHistoryInputRef, UsageStatsRef, StoreForwardStatusRef, GatewayConfigRef } from "./types.ts";
+import { ConfigEntryRef, LogEntryRef, NatsTrafficEntryRef, NetworkStateRef, NetworkInterfaceConfigRef, NftablesConfigRef, MqttMetricsResponseRef, VariableHistoryRef, VariableHistoryInputRef, UsageStatsRef, StoreForwardStatusRef, GatewayConfigRef, DesiredServiceRef, ServiceStatusRef } from "./types.ts";
 import { getMode } from "../types/config.ts";
 import { getRecentTraffic } from "../modules/nats-traffic.ts";
 import { requestNetworkState, requestNetworkConfig } from "../modules/network.ts";
@@ -269,6 +271,26 @@ builder.queryType({
       description: "List all gateway configurations",
       resolve: async () => {
         return await listGatewayConfigs();
+      },
+    }),
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Orchestrator
+    // ═══════════════════════════════════════════════════════════════════════
+
+    desiredServices: t.field({
+      type: [DesiredServiceRef],
+      description: "List all desired service states from the orchestrator KV",
+      resolve: async () => {
+        return await getAllDesiredServices();
+      },
+    }),
+
+    serviceStatuses: t.field({
+      type: [ServiceStatusRef],
+      description: "List all service statuses reported by the orchestrator",
+      resolve: async () => {
+        return await getAllServiceStatuses();
       },
     }),
   }),

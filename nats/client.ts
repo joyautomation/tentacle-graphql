@@ -2,7 +2,7 @@ import { connect, type NatsConnection } from "@nats-io/transport-deno";
 import { jetstream, type JetStreamClient } from "@nats-io/jetstream";
 import { Kvm, type KV } from "@nats-io/kv";
 import { createLogger, LogLevel } from "@joyautomation/coral";
-import type { PlcVariableKV, ServiceHeartbeat, ServiceEnabledKV, BrowseProgressMessage } from "@tentacle/nats-schema";
+import type { PlcVariableKV, ServiceHeartbeat, ServiceEnabledKV, BrowseProgressMessage, DesiredServiceKV, ServiceStatusKV } from "@tentacle/nats-schema";
 import { NATS_TOPICS, NATS_SUBSCRIPTIONS, substituteTopic, isBrowseProgressMessage } from "@tentacle/nats-schema";
 import type { NatsConfig } from "../types/config.ts";
 
@@ -12,6 +12,8 @@ let connection: NatsConnection | null = null;
 let jsClient: JetStreamClient | null = null;
 let heartbeatsKv: KV | null = null;
 let serviceEnabledKv: KV | null = null;
+let desiredServicesKv: KV | null = null;
+let serviceStatusKv: KV | null = null;
 
 export async function connectToNats(config: NatsConfig): Promise<void> {
   if (connection) {
@@ -37,6 +39,16 @@ export async function connectToNats(config: NatsConfig): Promise<void> {
   serviceEnabledKv = await kvm.create("service_enabled", {
     history: 1,
     ttl: 0, // No expiration — persists until explicitly changed
+  });
+
+  desiredServicesKv = await kvm.create("desired_services", {
+    history: 1,
+    ttl: 0,
+  });
+
+  serviceStatusKv = await kvm.create("service_status", {
+    history: 1,
+    ttl: 120 * 1000, // 2 minutes
   });
 
   log.info(`Connected to NATS at ${config.servers}`);
@@ -495,6 +507,245 @@ export async function subscribeToBrowseProgress(
       }
     },
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Gateway Device Browse (ad-hoc connections)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export type GatewayBrowseItem = {
+  tag: string;
+  name: string;
+  datatype: string;
+  value: unknown;
+  protocolType: string;
+};
+
+export type GatewayBrowseResult = {
+  deviceId: string;
+  protocol: string;
+  items: GatewayBrowseItem[];
+};
+
+/**
+ * Browse a device via its scanner using ad-hoc connection params.
+ * Routes to the correct NATS topic based on protocol.
+ */
+export async function browseGatewayDevice(input: {
+  deviceId: string;
+  protocol: string;
+  host?: string;
+  port?: number;
+  endpointUrl?: string;
+  version?: string;
+  community?: string;
+  rootOid?: string;
+  browseId?: string;
+}): Promise<GatewayBrowseResult> {
+  const nc = getNatsConnection();
+  const decoder = new TextDecoder();
+
+  switch (input.protocol) {
+    case "snmp": {
+      // Map gateway version format ("1","2c","3") to scanner format ("v1","v2c","v3")
+      const version = input.version?.startsWith("v") ? input.version : `v${input.version ?? "2c"}`;
+      const payload = {
+        deviceId: input.deviceId,
+        host: input.host ?? "localhost",
+        port: input.port ?? 161,
+        version,
+        community: input.community ?? "public",
+        rootOid: input.rootOid ?? ".1.3.6.1",
+        ...(input.browseId ? { browseId: input.browseId } : {}),
+      };
+
+      log.info(`Gateway browse SNMP device ${input.deviceId} at ${payload.host}:${payload.port}`);
+      const response = await nc.request(
+        NATS_TOPICS.snmp.browse,
+        new TextEncoder().encode(JSON.stringify(payload)),
+        { timeout: 120000 },
+      );
+
+      if (response.data && response.data.length > 0) {
+        const result = JSON.parse(decoder.decode(response.data));
+        // SNMP browse returns { deviceId, rootOid, oids: OidInfo[] }
+        const oids = result.oids ?? [];
+        const items: GatewayBrowseItem[] = oids.map((oid: { oid: string; name?: string; key?: string; value: unknown; snmpType: string; datatype: string }) => ({
+          tag: oid.oid,
+          name: oid.name || oid.key || oid.oid,
+          datatype: oid.datatype,
+          value: oid.value,
+          protocolType: oid.snmpType,
+        }));
+        return { deviceId: input.deviceId, protocol: "snmp", items };
+      }
+      return { deviceId: input.deviceId, protocol: "snmp", items: [] };
+    }
+
+    case "ethernetip": {
+      log.info(`Gateway browse EtherNet/IP device ${input.deviceId} at ${input.host}`);
+      const payload: Record<string, unknown> = {};
+      if (input.host) payload.plcId = input.host;
+      const response = await nc.request(
+        NATS_TOPICS.ethernetip.browse,
+        new TextEncoder().encode(JSON.stringify(payload)),
+        { timeout: 120000 },
+      );
+
+      if (response.data && response.data.length > 0) {
+        const data = JSON.parse(decoder.decode(response.data));
+        if (Array.isArray(data)) {
+          const items: GatewayBrowseItem[] = data.map((v: Record<string, unknown>) => ({
+            tag: String(v.variableId ?? v.tag ?? ""),
+            name: String(v.variableId ?? v.tag ?? ""),
+            datatype: String(v.datatype ?? "string"),
+            value: v.value,
+            protocolType: String(v.cipType ?? ""),
+          }));
+          return { deviceId: input.deviceId, protocol: "ethernetip", items };
+        }
+      }
+      return { deviceId: input.deviceId, protocol: "ethernetip", items: [] };
+    }
+
+    default:
+      throw new Error(`Browse not yet supported for protocol: ${input.protocol}`);
+  }
+}
+
+export type GatewayBrowseProgress = {
+  browseId: string;
+  deviceId: string;
+  phase: string;
+  discoveredCount: number;
+  message: string;
+  timestamp: number;
+};
+
+/**
+ * Subscribe to gateway browse progress updates.
+ * Normalizes protocol-specific progress formats into a common shape.
+ */
+export async function subscribeToGatewayBrowseProgress(
+  protocol: string,
+  browseId: string,
+): Promise<AsyncIterable<GatewayBrowseProgress>> {
+  const nc = getNatsConnection();
+  const subject = `${protocol}.browse.progress.${browseId}`;
+
+  log.info(`Subscribing to gateway browse progress on ${subject}`);
+  const sub = nc.subscribe(subject);
+
+  return {
+    [Symbol.asyncIterator]: async function* () {
+      try {
+        for await (const msg of sub) {
+          try {
+            if (msg.data && msg.data.length > 0) {
+              const raw = JSON.parse(new TextDecoder().decode(msg.data)) as Record<string, unknown>;
+              const progress: GatewayBrowseProgress = {
+                browseId: String(raw.browseId ?? browseId),
+                deviceId: String(raw.deviceId ?? ""),
+                phase: String(raw.phase ?? "walking"),
+                // Normalize: SNMP uses completedOids, EIP uses completedTags
+                discoveredCount: Number(raw.completedOids ?? raw.completedTags ?? 0),
+                message: String(raw.message ?? ""),
+                timestamp: Number(raw.timestamp ?? Date.now()),
+              };
+              yield progress;
+              if (progress.phase === "completed" || progress.phase === "failed") {
+                break;
+              }
+            }
+          } catch {
+            // Skip unparseable messages
+          }
+        }
+      } finally {
+        sub.unsubscribe();
+        log.info(`Unsubscribed from gateway browse progress ${browseId}`);
+      }
+    },
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Desired Services (orchestrator)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Get all desired service entries
+ */
+export async function getAllDesiredServices(): Promise<DesiredServiceKV[]> {
+  if (!desiredServicesKv) return [];
+  const results: DesiredServiceKV[] = [];
+  const decoder = new TextDecoder();
+  try {
+    const keys = await desiredServicesKv.keys();
+    for await (const key of keys) {
+      try {
+        const entry = await desiredServicesKv.get(key);
+        if (entry?.value) {
+          results.push(JSON.parse(decoder.decode(entry.value)) as DesiredServiceKV);
+        }
+      } catch { /* expired or invalid */ }
+    }
+  } catch { /* bucket may not exist */ }
+  return results;
+}
+
+/**
+ * Set the desired state for a service module
+ */
+export async function setDesiredService(moduleId: string, version: string, running: boolean): Promise<DesiredServiceKV> {
+  if (!desiredServicesKv) {
+    throw new Error("Desired services KV not initialized. NATS not connected.");
+  }
+  const state: DesiredServiceKV = {
+    moduleId,
+    version,
+    running,
+    updatedAt: Date.now(),
+  };
+  const encoder = new TextEncoder();
+  await desiredServicesKv.put(moduleId, encoder.encode(JSON.stringify(state)));
+  log.info(`Set desired service ${moduleId}: version=${version}, running=${running}`);
+  return state;
+}
+
+/**
+ * Delete a desired service entry
+ */
+export async function deleteDesiredService(moduleId: string): Promise<boolean> {
+  if (!desiredServicesKv) return false;
+  try {
+    await desiredServicesKv.delete(moduleId);
+    log.info(`Deleted desired service: ${moduleId}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get all service status entries reported by the orchestrator
+ */
+export async function getAllServiceStatuses(): Promise<ServiceStatusKV[]> {
+  if (!serviceStatusKv) return [];
+  const results: ServiceStatusKV[] = [];
+  const decoder = new TextDecoder();
+  try {
+    const keys = await serviceStatusKv.keys();
+    for await (const key of keys) {
+      try {
+        const entry = await serviceStatusKv.get(key);
+        if (entry?.value) {
+          results.push(JSON.parse(decoder.decode(entry.value)) as ServiceStatusKV);
+        }
+      } catch { /* expired or invalid */ }
+    }
+  } catch { /* bucket may not exist */ }
+  return results;
 }
 
 /**

@@ -1,5 +1,5 @@
 import { builder } from "./builder.ts";
-import { publishCommand, getVariable, browseTags, subscribeTags, unsubscribeTags, getNatsConnection, setServiceEnabled, getHeartbeat } from "../nats/client.ts";
+import { publishCommand, getVariable, browseTags, subscribeTags, unsubscribeTags, getNatsConnection, setServiceEnabled, getHeartbeat, browseGatewayDevice, setDesiredService, deleteDesiredService } from "../nats/client.ts";
 import { updateConfigValue } from "../modules/service-config.ts";
 import {
   ConfigEntryRef,
@@ -11,6 +11,9 @@ import {
   GatewayConfigRef,
   GatewayDeviceInputRef,
   GatewayVariableInputRef,
+  GatewayBrowseResultRef,
+  GatewayBrowseInputRef,
+  DesiredServiceRef,
 } from "./types.ts";
 import { applyNetworkConfig } from "../modules/network.ts";
 import { applyNftablesConfig } from "../modules/nftables.ts";
@@ -343,6 +346,60 @@ builder.mutationType({
       },
       resolve: async (_root, args) => {
         return await deleteGatewayVariables(args.gatewayId, args.variableIds);
+      },
+    }),
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Gateway Device Browse
+    // ═══════════════════════════════════════════════════════════════════════
+
+    browseGatewayDevice: t.field({
+      type: GatewayBrowseResultRef,
+      description: "Browse a gateway device to discover available tags/OIDs using ad-hoc connection params.",
+      args: {
+        input: t.arg({ type: GatewayBrowseInputRef, required: true }),
+      },
+      resolve: async (_root, args) => {
+        const i = args.input;
+        return await browseGatewayDevice({
+          deviceId: i.deviceId,
+          protocol: i.protocol,
+          host: i.host ?? undefined,
+          port: i.port ?? undefined,
+          endpointUrl: i.endpointUrl ?? undefined,
+          version: i.version ?? undefined,
+          community: i.community ?? undefined,
+          rootOid: i.rootOid ?? undefined,
+          browseId: i.browseId ?? undefined,
+        });
+      },
+    }),
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Orchestrator
+    // ═══════════════════════════════════════════════════════════════════════
+
+    setDesiredService: t.field({
+      type: DesiredServiceRef,
+      description: "Set the desired state for a service module (version + running). The orchestrator will reconcile.",
+      args: {
+        moduleId: t.arg.string({ required: true }),
+        version: t.arg.string({ required: true }),
+        running: t.arg.boolean({ required: true }),
+      },
+      resolve: async (_root, args) => {
+        return await setDesiredService(args.moduleId, args.version, args.running);
+      },
+    }),
+
+    deleteDesiredService: t.field({
+      type: "Boolean",
+      description: "Remove a module from the orchestrator's desired state. The orchestrator will stop managing it.",
+      args: {
+        moduleId: t.arg.string({ required: true }),
+      },
+      resolve: async (_root, args) => {
+        return await deleteDesiredService(args.moduleId);
       },
     }),
   }),

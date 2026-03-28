@@ -1,12 +1,12 @@
 import { builder } from "./builder.ts";
 import { WatcherManager } from "../nats/watcher.ts";
-import { subscribeToBrowseProgress } from "../nats/client.ts";
+import { subscribeToBrowseProgress, subscribeToGatewayBrowseProgress, type GatewayBrowseProgress } from "../nats/client.ts";
 import { subscribeToServiceLogs } from "../modules/logs.ts";
 import { subscribeToNatsTraffic, type NatsTrafficEntry } from "../modules/nats-traffic.ts";
 import { subscribeToNetworkState } from "../modules/network.ts";
 import { subscribeToNftablesConfig } from "../modules/nftables.ts";
 import type { PlcVariableKV, BrowseProgressMessage, ServiceLogEntry, NetworkStateMessage, NftablesConfig } from "@tentacle/nats-schema";
-import { BrowseProgressRef, LogEntryRef, NatsTrafficEntryRef, NetworkStateRef, NftablesConfigRef } from "./types.ts";
+import { BrowseProgressRef, LogEntryRef, NatsTrafficEntryRef, NetworkStateRef, NftablesConfigRef, GatewayBrowseProgressRef } from "./types.ts";
 
 const watcherManager = new WatcherManager();
 
@@ -92,6 +92,22 @@ builder.subscriptionType({
         }
       },
       resolve: (progress: BrowseProgressMessage) => progress,
+    }),
+
+    // Subscribe to gateway device browse progress
+    gatewayBrowseProgress: t.field({
+      type: GatewayBrowseProgressRef,
+      args: {
+        browseId: t.arg.string({ required: true }),
+        protocol: t.arg.string({ required: true }),
+      },
+      subscribe: async function* (_root: unknown, args: { browseId: string; protocol: string }) {
+        const progressStream = await subscribeToGatewayBrowseProgress(args.protocol, args.browseId);
+        for await (const progress of progressStream) {
+          yield progress;
+        }
+      },
+      resolve: (progress: GatewayBrowseProgress) => progress,
     }),
 
     // Subscribe to real-time service log entries

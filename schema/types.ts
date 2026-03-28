@@ -1,6 +1,6 @@
 import { builder } from "./builder.ts";
 import type { PlcVariableKV, DeadBandConfig, ServiceHeartbeat, BrowseProgressMessage } from "@tentacle/nats-schema";
-import { getServiceEnabled } from "../nats/client.ts";
+import { getServiceEnabled, getAllHeartbeats } from "../nats/client.ts";
 
 // Extended heartbeat with enabled state for GraphQL resolution
 type ServiceWithEnabled = ServiceHeartbeat & { _enabled?: boolean };
@@ -646,6 +646,17 @@ builder.objectType(GatewayConfigRef, {
       type: "DateTime",
       resolve: (c) => new Date(c.updatedAt),
     }),
+    availableProtocols: t.field({
+      type: ["String"],
+      description: "Protocol types that have an active service module connected",
+      resolve: async () => {
+        const protocolServiceTypes = new Set(["ethernetip", "opcua", "snmp", "modbus"]);
+        const heartbeats = await getAllHeartbeats();
+        return heartbeats
+          .map((hb) => hb.serviceType)
+          .filter((st) => protocolServiceTypes.has(st));
+      },
+    }),
   }),
 });
 
@@ -689,7 +700,119 @@ const GatewayVariableInputRef = builder.inputType("GatewayVariableInput", {
   }),
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Gateway Browse Types
+// ═══════════════════════════════════════════════════════════════════════════
+
+import type { GatewayBrowseItem, GatewayBrowseResult } from "../nats/client.ts";
+
+const GatewayBrowseItemRef = builder.objectRef<GatewayBrowseItem>("GatewayBrowseItem");
+builder.objectType(GatewayBrowseItemRef, {
+  fields: (t) => ({
+    tag: t.exposeString("tag"),
+    name: t.exposeString("name"),
+    datatype: t.exposeString("datatype"),
+    value: t.field({
+      type: "JSON",
+      nullable: true,
+      resolve: (item) => item.value,
+    }),
+    protocolType: t.exposeString("protocolType"),
+  }),
+});
+
+const GatewayBrowseResultRef = builder.objectRef<GatewayBrowseResult>("GatewayBrowseResult");
+builder.objectType(GatewayBrowseResultRef, {
+  fields: (t) => ({
+    deviceId: t.exposeString("deviceId"),
+    protocol: t.exposeString("protocol"),
+    items: t.field({
+      type: [GatewayBrowseItemRef],
+      resolve: (r) => r.items,
+    }),
+  }),
+});
+
+const GatewayBrowseInputRef = builder.inputType("GatewayBrowseInput", {
+  fields: (t) => ({
+    deviceId: t.string({ required: true }),
+    protocol: t.string({ required: true }),
+    host: t.string({ required: false }),
+    port: t.int({ required: false }),
+    endpointUrl: t.string({ required: false }),
+    version: t.string({ required: false }),
+    community: t.string({ required: false }),
+    rootOid: t.string({ required: false }),
+    browseId: t.string({ required: false, description: "Client-generated browse ID for progress tracking" }),
+  }),
+});
+
+// Gateway browse progress — normalized from protocol-specific formats
+type GatewayBrowseProgressShape = {
+  browseId: string;
+  deviceId: string;
+  phase: string;
+  discoveredCount: number;
+  message: string;
+  timestamp: number;
+};
+
+const GatewayBrowseProgressRef = builder.objectRef<GatewayBrowseProgressShape>("GatewayBrowseProgress");
+builder.objectType(GatewayBrowseProgressRef, {
+  fields: (t) => ({
+    browseId: t.exposeString("browseId"),
+    deviceId: t.exposeString("deviceId"),
+    phase: t.exposeString("phase"),
+    discoveredCount: t.exposeInt("discoveredCount"),
+    message: t.exposeString("message"),
+    timestamp: t.field({
+      type: "DateTime",
+      resolve: (p) => new Date(p.timestamp),
+    }),
+  }),
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Orchestrator Types
+// ═══════════════════════════════════════════════════════════════════════════
+
+import type { DesiredServiceKV, ServiceStatusKV } from "@tentacle/nats-schema";
+
+const DesiredServiceRef = builder.objectRef<DesiredServiceKV>("DesiredService");
+builder.objectType(DesiredServiceRef, {
+  fields: (t) => ({
+    moduleId: t.exposeString("moduleId"),
+    version: t.exposeString("version"),
+    running: t.exposeBoolean("running"),
+    updatedAt: t.field({
+      type: "DateTime",
+      resolve: (d) => new Date(d.updatedAt),
+    }),
+  }),
+});
+
+const ServiceStatusRef = builder.objectRef<ServiceStatusKV>("ServiceStatus");
+builder.objectType(ServiceStatusRef, {
+  fields: (t) => ({
+    moduleId: t.exposeString("moduleId"),
+    installedVersions: t.exposeStringList("installedVersions"),
+    activeVersion: t.exposeString("activeVersion", { nullable: true }),
+    systemdState: t.exposeString("systemdState"),
+    reconcileState: t.exposeString("reconcileState"),
+    lastError: t.exposeString("lastError", { nullable: true }),
+    runtime: t.exposeString("runtime"),
+    category: t.exposeString("category"),
+    repo: t.exposeString("repo"),
+    updatedAt: t.field({
+      type: "DateTime",
+      resolve: (s) => new Date(s.updatedAt),
+    }),
+  }),
+});
+
 export {
+  DesiredServiceRef,
+  ServiceStatusRef,
   ConfigEntryRef,
   LogEntryRef,
   NatsTrafficEntryRef,
@@ -708,4 +831,7 @@ export {
   GatewayConfigRef,
   GatewayDeviceInputRef,
   GatewayVariableInputRef,
+  GatewayBrowseResultRef,
+  GatewayBrowseInputRef,
+  GatewayBrowseProgressRef,
 };

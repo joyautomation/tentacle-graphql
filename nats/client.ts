@@ -5,6 +5,7 @@ import { createLogger, LogLevel } from "@joyautomation/coral";
 import type { PlcVariableKV, ServiceHeartbeat, ServiceEnabledKV, BrowseProgressMessage, DesiredServiceKV, ServiceStatusKV } from "@tentacle/nats-schema";
 import { NATS_TOPICS, NATS_SUBSCRIPTIONS, substituteTopic, isBrowseProgressMessage } from "@tentacle/nats-schema";
 import type { NatsConfig } from "../types/config.ts";
+import { getBrowseState, setBrowseState, cacheBrowseResult } from "../modules/gateway.ts";
 
 const log = createLogger("graphql-nats", LogLevel.info);
 
@@ -521,10 +522,25 @@ export type GatewayBrowseItem = {
   protocolType: string;
 };
 
+export type GatewayBrowseUdtMember = {
+  name: string;
+  datatype: string;
+  cipType: string;
+  udtType: string;
+  isArray: boolean;
+};
+
+export type GatewayBrowseUdt = {
+  name: string;
+  members: GatewayBrowseUdtMember[];
+};
+
 export type GatewayBrowseResult = {
   deviceId: string;
   protocol: string;
   items: GatewayBrowseItem[];
+  udts: GatewayBrowseUdt[];
+  structTags: Record<string, string>;
 };
 
 /**
@@ -577,35 +593,90 @@ export async function browseGatewayDevice(input: {
           value: oid.value,
           protocolType: oid.snmpType,
         }));
-        return { deviceId: input.deviceId, protocol: "snmp", items };
+        return { deviceId: input.deviceId, protocol: "snmp", items, udts: [], structTags: {} };
       }
-      return { deviceId: input.deviceId, protocol: "snmp", items: [] };
+      return { deviceId: input.deviceId, protocol: "snmp", items: [], udts: [], structTags: {} };
     }
 
     case "ethernetip": {
       log.info(`Gateway browse EtherNet/IP device ${input.deviceId} at ${input.host}`);
-      const payload: Record<string, unknown> = {};
-      if (input.host) payload.plcId = input.host;
-      const response = await nc.request(
+      const payload: Record<string, unknown> = {
+        deviceId: input.deviceId,
+        host: input.host ?? "",
+        ...(input.port ? { port: input.port } : {}),
+        ...(input.browseId ? { browseId: input.browseId } : {}),
+      };
+      // Scanner responds immediately with { browseId } and runs browse async.
+      // We need to subscribe to the result topic before sending the request
+      // to avoid a race condition.
+      const browseId = input.browseId ?? crypto.randomUUID();
+      if (!payload.browseId) payload.browseId = browseId;
+
+      const resultSubject = `ethernetip.browse.result.${browseId}`;
+      const resultSub = nc.subscribe(resultSubject, { max: 1 });
+
+      // Send the browse request
+      await nc.request(
         NATS_TOPICS.ethernetip.browse,
         new TextEncoder().encode(JSON.stringify(payload)),
-        { timeout: 120000 },
+        { timeout: 10000 },
       );
 
-      if (response.data && response.data.length > 0) {
-        const data = JSON.parse(decoder.decode(response.data));
-        if (Array.isArray(data)) {
-          const items: GatewayBrowseItem[] = data.map((v: Record<string, unknown>) => ({
-            tag: String(v.variableId ?? v.tag ?? ""),
-            name: String(v.variableId ?? v.tag ?? ""),
-            datatype: String(v.datatype ?? "string"),
-            value: v.value,
-            protocolType: String(v.cipType ?? ""),
-          }));
-          return { deviceId: input.deviceId, protocol: "ethernetip", items };
+      // Wait for the async result with a timeout (browse can take a few minutes for large PLCs)
+      const BROWSE_TIMEOUT_MS = 300000; // 5 minutes
+      try {
+        const result = await Promise.race([
+          (async () => {
+            for await (const msg of resultSub) {
+              if (msg.data && msg.data.length > 0) {
+                return JSON.parse(decoder.decode(msg.data));
+              }
+            }
+            return null;
+          })(),
+          new Promise<null>((_, reject) =>
+            setTimeout(() => reject(new Error("Browse timed out")), BROWSE_TIMEOUT_MS)
+          ),
+        ]);
+
+        if (result) {
+          const variables = result.variables;
+          const items: GatewayBrowseItem[] = Array.isArray(variables)
+            ? variables.map((v: Record<string, unknown>) => ({
+                tag: String(v.variableId ?? v.tag ?? ""),
+                name: String(v.variableId ?? v.tag ?? ""),
+                datatype: String(v.datatype ?? "string"),
+                value: v.value,
+                protocolType: String(v.cipType ?? ""),
+              }))
+            : [];
+
+          // Extract UDT templates from browse result
+          const rawUdts = result.udts as Record<string, { name: string; members: Array<{ name: string; datatype: string; udtType?: string; isArray?: boolean }> }> | undefined;
+          const udts: GatewayBrowseUdt[] = rawUdts
+            ? Object.values(rawUdts).map((udt) => ({
+                name: udt.name,
+                members: (udt.members ?? []).map((m) => ({
+                  name: m.name,
+                  datatype: m.datatype,
+                  cipType: m.cipType ?? "",
+                  udtType: m.udtType ?? "",
+                  isArray: m.isArray ?? false,
+                })),
+              }))
+            : [];
+
+          // Extract struct tag → UDT type mapping
+          const structTags = (result.structTags as Record<string, string>) ?? {};
+
+          return { deviceId: input.deviceId, protocol: "ethernetip", items, udts, structTags };
         }
+      } catch (err) {
+        log.error(`Browse failed for device ${input.deviceId}: ${err}`);
+      } finally {
+        resultSub.unsubscribe();
       }
-      return { deviceId: input.deviceId, protocol: "ethernetip", items: [] };
+      return { deviceId: input.deviceId, protocol: "ethernetip", items: [], udts: [], structTags: {} };
     }
 
     default:
@@ -613,11 +684,148 @@ export async function browseGatewayDevice(input: {
   }
 }
 
+/**
+ * Start a non-blocking browse of a gateway device.
+ * Writes initial state to KV, spawns a background task that runs the browse
+ * and updates KV state as progress comes in.
+ */
+export async function startGatewayBrowse(input: {
+  deviceId: string;
+  protocol: string;
+  host?: string;
+  port?: number;
+  endpointUrl?: string;
+  version?: string;
+  community?: string;
+  rootOid?: string;
+}): Promise<{ browseId: string; deviceId: string }> {
+  // Check for existing active browse on this device
+  const existing = await getBrowseState(input.deviceId);
+  if (existing && existing.status === "browsing") {
+    throw new Error(
+      `Browse already in progress for device ${input.deviceId} (browseId: ${existing.browseId})`
+    );
+  }
+
+  const browseId = crypto.randomUUID();
+  const now = Date.now();
+
+  // Write initial browse state to KV
+  await setBrowseState({
+    deviceId: input.deviceId,
+    browseId,
+    protocol: input.protocol,
+    status: "browsing",
+    phase: "connecting",
+    discoveredCount: 0,
+    totalCount: 0,
+    message: "Starting browse...",
+    startedAt: now,
+    updatedAt: now,
+  });
+
+  // Spawn background task (fire-and-forget)
+  (async () => {
+    const nc = getNatsConnection();
+    const progressSubject = `${input.protocol}.browse.progress.${browseId}`;
+    const progressSub = nc.subscribe(progressSubject);
+
+    // Background: listen for progress and update KV state
+    const progressLoop = (async () => {
+      try {
+        for await (const msg of progressSub) {
+          try {
+            if (msg.data && msg.data.length > 0) {
+              const raw = JSON.parse(new TextDecoder().decode(msg.data)) as Record<string, unknown>;
+              const phase = String(raw.phase ?? "walking");
+              const discoveredCount = Number(raw.completedOids ?? raw.completedTags ?? 0);
+              const totalCount = Number(raw.totalOids ?? raw.totalTags ?? 0);
+              const message = String(raw.message ?? "");
+
+              await setBrowseState({
+                deviceId: input.deviceId,
+                browseId,
+                protocol: input.protocol,
+                status: "browsing",
+                phase,
+                discoveredCount,
+                totalCount,
+                message,
+                startedAt: now,
+                updatedAt: Date.now(),
+              });
+
+              if (phase === "completed" || phase === "failed") {
+                break;
+              }
+            }
+          } catch {
+            // Skip unparseable messages
+          }
+        }
+      } catch {
+        // Subscription ended
+      }
+    })();
+
+    try {
+      // Run the blocking browse
+      const result = await browseGatewayDevice({
+        ...input,
+        browseId,
+      });
+
+      // Cache successful results
+      if (result.items.length > 0 || result.udts.length > 0) {
+        await cacheBrowseResult(input.deviceId, { ...result, cachedAt: Date.now() });
+      }
+
+      // Mark as completed
+      await setBrowseState({
+        deviceId: input.deviceId,
+        browseId,
+        protocol: input.protocol,
+        status: "completed",
+        phase: "completed",
+        discoveredCount: result.items.length,
+        totalCount: result.items.length,
+        message: `Discovered ${result.items.length} tags, ${result.udts.length} UDT types`,
+        startedAt: now,
+        updatedAt: Date.now(),
+      });
+    } catch (err) {
+      // Mark as failed
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      log.error(`Background browse failed for ${input.deviceId}: ${errorMessage}`);
+      await setBrowseState({
+        deviceId: input.deviceId,
+        browseId,
+        protocol: input.protocol,
+        status: "failed",
+        phase: "failed",
+        discoveredCount: 0,
+        totalCount: 0,
+        message: errorMessage,
+        startedAt: now,
+        updatedAt: Date.now(),
+        error: errorMessage,
+      });
+    } finally {
+      progressSub.unsubscribe();
+      // Wait for the progress loop to finish cleanly
+      await progressLoop;
+    }
+  })();
+
+  return { browseId, deviceId: input.deviceId };
+}
+
 export type GatewayBrowseProgress = {
   browseId: string;
   deviceId: string;
   phase: string;
   discoveredCount: number;
+  totalCount: number;
   message: string;
   timestamp: number;
 };
@@ -649,6 +857,7 @@ export async function subscribeToGatewayBrowseProgress(
                 phase: String(raw.phase ?? "walking"),
                 // Normalize: SNMP uses completedOids, EIP uses completedTags
                 discoveredCount: Number(raw.completedOids ?? raw.completedTags ?? 0),
+                totalCount: Number(raw.totalOids ?? raw.totalTags ?? 0),
                 message: String(raw.message ?? ""),
                 timestamp: Number(raw.timestamp ?? Date.now()),
               };

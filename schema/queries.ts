@@ -9,7 +9,7 @@ import {
   getAllServiceStatuses,
 } from "../nats/client.ts";
 import { getRecentLogs } from "../modules/logs.ts";
-import { ConfigEntryRef, LogEntryRef, NatsTrafficEntryRef, NetworkStateRef, NetworkInterfaceConfigRef, NftablesConfigRef, MqttMetricsResponseRef, VariableHistoryRef, VariableHistoryInputRef, UsageStatsRef, StoreForwardStatusRef, GatewayConfigRef, DesiredServiceRef, ServiceStatusRef } from "./types.ts";
+import { ConfigEntryRef, LogEntryRef, NatsTrafficEntryRef, NetworkStateRef, NetworkInterfaceConfigRef, NftablesConfigRef, MqttMetricsResponseRef, VariableHistoryRef, VariableHistoryInputRef, UsageStatsRef, StoreForwardStatusRef, GatewayConfigRef, GatewayBrowseResultRef, GatewayBrowseStateRef, DesiredServiceRef, ServiceStatusRef, ModuleRegistryInfoRef, ModuleVersionInfoRef } from "./types.ts";
 import { getMode } from "../types/config.ts";
 import { getRecentTraffic } from "../modules/nats-traffic.ts";
 import { requestNetworkState, requestNetworkConfig } from "../modules/network.ts";
@@ -18,7 +18,8 @@ import { requestMqttMetrics } from "../modules/mqtt.ts";
 import { getHistory, getUsage, getHistoryPool } from "../modules/history.ts";
 import { requestStoreForwardStatus } from "../modules/store-forward.ts";
 import { getServiceConfig, getAllConfig } from "../modules/service-config.ts";
-import { getGatewayConfig, listGatewayConfigs } from "../modules/gateway.ts";
+import { getGatewayConfig, listGatewayConfigs, getCachedBrowseResult, getBrowseState, getAllBrowseStates } from "../modules/gateway.ts";
+import { requestModuleRegistry, requestInternetCheck, requestModuleVersions } from "../modules/orchestrator.ts";
 
 builder.queryType({
   fields: (t) => ({
@@ -274,6 +275,38 @@ builder.queryType({
       },
     }),
 
+    gatewayBrowseCache: t.field({
+      type: GatewayBrowseResultRef,
+      nullable: true,
+      description: "Get cached browse results for a device (returns null if no cache exists)",
+      args: {
+        deviceId: t.arg.string({ required: true }),
+      },
+      resolve: async (_root, args) => {
+        return await getCachedBrowseResult(args.deviceId);
+      },
+    }),
+
+    gatewayBrowseStates: t.field({
+      type: [GatewayBrowseStateRef],
+      description: "Get all active/recent browse states across all devices",
+      resolve: async () => {
+        return await getAllBrowseStates();
+      },
+    }),
+
+    gatewayBrowseState: t.field({
+      type: GatewayBrowseStateRef,
+      nullable: true,
+      description: "Get the browse state for a specific device",
+      args: {
+        deviceId: t.arg.string({ required: true }),
+      },
+      resolve: async (_root, args) => {
+        return await getBrowseState(args.deviceId);
+      },
+    }),
+
     // ═══════════════════════════════════════════════════════════════════════
     // Orchestrator
     // ═══════════════════════════════════════════════════════════════════════
@@ -291,6 +324,57 @@ builder.queryType({
       description: "List all service statuses reported by the orchestrator",
       resolve: async () => {
         return await getAllServiceStatuses();
+      },
+    }),
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Module Management
+    // ═══════════════════════════════════════════════════════════════════════
+
+    availableModules: t.field({
+      type: [ModuleRegistryInfoRef],
+      description: "List all modules in the orchestrator registry (installed and available)",
+      resolve: async () => {
+        try {
+          const nc = getNatsConnection();
+          return await requestModuleRegistry(nc);
+        } catch {
+          return [];
+        }
+      },
+    }),
+
+    internetConnectivity: t.field({
+      type: "Boolean",
+      description: "Check if the server has internet connectivity (can reach GitHub for downloads)",
+      resolve: async () => {
+        try {
+          const nc = getNatsConnection();
+          return await requestInternetCheck(nc);
+        } catch {
+          return false;
+        }
+      },
+    }),
+
+    moduleVersions: t.field({
+      type: ModuleVersionInfoRef,
+      description: "Get version information for a specific module (installed, active, latest)",
+      args: {
+        moduleId: t.arg.string({ required: true }),
+      },
+      resolve: async (_root, args) => {
+        try {
+          const nc = getNatsConnection();
+          return await requestModuleVersions(nc, args.moduleId);
+        } catch {
+          return {
+            moduleId: args.moduleId,
+            installedVersions: [],
+            latestVersion: null,
+            activeVersion: null,
+          };
+        }
       },
     }),
   }),

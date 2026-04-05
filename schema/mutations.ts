@@ -1,5 +1,5 @@
 import { builder } from "./builder.ts";
-import { publishCommand, getVariable, browseTags, subscribeTags, unsubscribeTags, getNatsConnection, setServiceEnabled, getHeartbeat, browseGatewayDevice, setDesiredService, deleteDesiredService } from "../nats/client.ts";
+import { publishCommand, getVariable, browseTags, subscribeTags, unsubscribeTags, getNatsConnection, setServiceEnabled, getHeartbeat, browseGatewayDevice, startGatewayBrowse, setDesiredService, deleteDesiredService } from "../nats/client.ts";
 import { updateConfigValue } from "../modules/service-config.ts";
 import {
   ConfigEntryRef,
@@ -13,6 +13,9 @@ import {
   GatewayVariableInputRef,
   GatewayBrowseResultRef,
   GatewayBrowseInputRef,
+  StartBrowseResultRef,
+  GatewayUdtTemplateInputRef,
+  GatewayUdtVariableInputRef,
   DesiredServiceRef,
 } from "./types.ts";
 import { applyNetworkConfig } from "../modules/network.ts";
@@ -24,6 +27,13 @@ import {
   setGatewayVariables,
   deleteGatewayVariable,
   deleteGatewayVariables,
+  deleteGatewayUdtVariable,
+  deleteGatewayUdtVariables,
+  importGatewayBrowse,
+  syncGatewayDeviceVariables,
+  updateGatewayUdtConfig,
+  cacheBrowseResult,
+  setTemplateNameOverrides,
 } from "../modules/gateway.ts";
 import type { NetworkInterfaceConfig, NatRule, GatewayDeviceConfig, GatewayVariableConfig, DeadBandConfig } from "@tentacle/nats-schema";
 
@@ -254,6 +264,11 @@ builder.mutationType({
             throw new Error(`Unknown protocol: ${d.protocol}`);
         }
 
+        // Apply shared device-level settings
+        if (d.scanRate != null) (deviceConfig as any).scanRate = d.scanRate;
+        if (d.deadband) (deviceConfig as any).deadband = { value: d.deadband.value, minTime: d.deadband.minTime ?? undefined, maxTime: d.deadband.maxTime ?? undefined } as DeadBandConfig;
+        if (d.disableRBE != null) (deviceConfig as any).disableRBE = d.disableRBE;
+
         return await setGatewayDevice(args.gatewayId, d.deviceId, deviceConfig);
       },
     }),
@@ -267,6 +282,19 @@ builder.mutationType({
       },
       resolve: async (_root, args) => {
         return await deleteGatewayDevice(args.gatewayId, args.deviceId);
+      },
+    }),
+
+    setTemplateNameOverrides: t.field({
+      type: GatewayConfigRef,
+      description: "Set template name overrides for a device (browse original name → unique name).",
+      args: {
+        gatewayId: t.arg.string({ required: true }),
+        deviceId: t.arg.string({ required: true }),
+        overrides: t.arg({ type: "JSON", required: true }),
+      },
+      resolve: async (_root, args) => {
+        return await setTemplateNameOverrides(args.gatewayId, args.deviceId, args.overrides as Record<string, string>);
       },
     }),
 
@@ -286,6 +314,7 @@ builder.mutationType({
           default: (v.default ?? (v.datatype === "boolean" ? false : v.datatype === "string" ? "" : 0)) as number | boolean | string,
           deviceId: v.deviceId,
           tag: v.tag,
+          cipType: v.cipType ?? undefined,
           bidirectional: v.bidirectional ?? undefined,
           deadband: v.deadband ? { value: v.deadband.value, minTime: v.deadband.minTime ?? undefined, maxTime: v.deadband.maxTime ?? undefined } as DeadBandConfig : undefined,
           disableRBE: v.disableRBE ?? undefined,
@@ -313,6 +342,7 @@ builder.mutationType({
           default: (v.default ?? (v.datatype === "boolean" ? false : v.datatype === "string" ? "" : 0)) as number | boolean | string,
           deviceId: v.deviceId,
           tag: v.tag,
+          cipType: v.cipType ?? undefined,
           bidirectional: v.bidirectional ?? undefined,
           deadband: v.deadband ? { value: v.deadband.value, minTime: v.deadband.minTime ?? undefined, maxTime: v.deadband.maxTime ?? undefined } as DeadBandConfig : undefined,
           disableRBE: v.disableRBE ?? undefined,
@@ -349,6 +379,158 @@ builder.mutationType({
       },
     }),
 
+    deleteGatewayUdtVariable: t.field({
+      type: GatewayConfigRef,
+      description: "Remove a UDT variable (and orphaned templates) from the gateway config.",
+      args: {
+        gatewayId: t.arg.string({ required: true }),
+        udtVariableId: t.arg.string({ required: true }),
+      },
+      resolve: async (_root, args) => {
+        return await deleteGatewayUdtVariable(args.gatewayId, args.udtVariableId);
+      },
+    }),
+
+    deleteGatewayUdtVariables: t.field({
+      type: GatewayConfigRef,
+      description: "Bulk remove UDT variables (and orphaned templates) from the gateway config.",
+      args: {
+        gatewayId: t.arg.string({ required: true }),
+        udtVariableIds: t.arg.stringList({ required: true }),
+      },
+      resolve: async (_root, args) => {
+        return await deleteGatewayUdtVariables(args.gatewayId, args.udtVariableIds);
+      },
+    }),
+
+    syncGatewayDeviceVariables: t.field({
+      type: GatewayConfigRef,
+      description: "Atomically replace all variables for a device. Checked = published, unchecked = removed.",
+      args: {
+        gatewayId: t.arg.string({ required: true }),
+        deviceId: t.arg.string({ required: true }),
+        atomicVariables: t.arg({ type: [GatewayVariableInputRef], required: false }),
+        udtTemplates: t.arg({ type: [GatewayUdtTemplateInputRef], required: false }),
+        udtVariables: t.arg({ type: [GatewayUdtVariableInputRef], required: false }),
+      },
+      resolve: async (_root, args) => {
+        const atomicVars = (args.atomicVariables ?? []).map((v) => ({
+          id: v.id,
+          description: v.description ?? undefined,
+          datatype: v.datatype as "number" | "boolean" | "string",
+          default: (v.default ?? (v.datatype === "boolean" ? false : v.datatype === "string" ? "" : 0)) as number | boolean | string,
+          deviceId: v.deviceId,
+          tag: v.tag,
+          cipType: v.cipType ?? undefined,
+          bidirectional: v.bidirectional ?? undefined,
+          deadband: v.deadband ? { value: v.deadband.value, minTime: v.deadband.minTime ?? undefined, maxTime: v.deadband.maxTime ?? undefined } as DeadBandConfig : undefined,
+          disableRBE: v.disableRBE ?? undefined,
+          functionCode: v.functionCode ?? undefined,
+          modbusDatatype: v.modbusDatatype ?? undefined,
+          byteOrder: v.byteOrder ?? undefined,
+          address: v.address ?? undefined,
+        }));
+
+        const templates = (args.udtTemplates ?? []).map((t) => ({
+          name: t.name,
+          version: t.version ?? undefined,
+          members: t.members.map((m) => ({
+            name: m.name,
+            datatype: m.datatype,
+            templateRef: m.templateRef ?? undefined,
+            defaultDeadband: m.defaultDeadband ? { value: m.defaultDeadband.value, minTime: m.defaultDeadband.minTime ?? undefined, maxTime: m.defaultDeadband.maxTime ?? undefined } as DeadBandConfig : undefined,
+          })),
+        }));
+
+        const udtVars = (args.udtVariables ?? []).map((uv) => ({
+          id: uv.id,
+          deviceId: uv.deviceId,
+          tag: uv.tag,
+          templateName: uv.templateName,
+          memberTags: uv.memberTags as Record<string, string>,
+          memberCipTypes: uv.memberCipTypes as Record<string, string> | undefined,
+          memberDeadbands: uv.memberDeadbands as Record<string, DeadBandConfig> | undefined,
+        }));
+
+        return await syncGatewayDeviceVariables(args.gatewayId, args.deviceId, atomicVars, templates, udtVars);
+      },
+    }),
+
+    importGatewayBrowse: t.field({
+      type: GatewayConfigRef,
+      description: "Import browsed tags: atomic variables, UDT templates, and UDT variable instances.",
+      args: {
+        gatewayId: t.arg.string({ required: true }),
+        atomicVariables: t.arg({ type: [GatewayVariableInputRef], required: false }),
+        udtTemplates: t.arg({ type: [GatewayUdtTemplateInputRef], required: false }),
+        udtVariables: t.arg({ type: [GatewayUdtVariableInputRef], required: false }),
+      },
+      resolve: async (_root, args) => {
+        const atomicVars = (args.atomicVariables ?? []).map((v) => ({
+          id: v.id,
+          description: v.description ?? undefined,
+          datatype: v.datatype as "number" | "boolean" | "string",
+          default: (v.default ?? (v.datatype === "boolean" ? false : v.datatype === "string" ? "" : 0)) as number | boolean | string,
+          deviceId: v.deviceId,
+          tag: v.tag,
+          cipType: v.cipType ?? undefined,
+          bidirectional: v.bidirectional ?? undefined,
+          deadband: v.deadband ? { value: v.deadband.value, minTime: v.deadband.minTime ?? undefined, maxTime: v.deadband.maxTime ?? undefined } as DeadBandConfig : undefined,
+          disableRBE: v.disableRBE ?? undefined,
+          functionCode: v.functionCode ?? undefined,
+          modbusDatatype: v.modbusDatatype ?? undefined,
+          byteOrder: v.byteOrder ?? undefined,
+          address: v.address ?? undefined,
+        }));
+
+        const templates = (args.udtTemplates ?? []).map((t) => ({
+          name: t.name,
+          version: t.version ?? undefined,
+          members: t.members.map((m) => ({
+            name: m.name,
+            datatype: m.datatype,
+            templateRef: m.templateRef ?? undefined,
+            defaultDeadband: m.defaultDeadband ? { value: m.defaultDeadband.value, minTime: m.defaultDeadband.minTime ?? undefined, maxTime: m.defaultDeadband.maxTime ?? undefined } as DeadBandConfig : undefined,
+          })),
+        }));
+
+        const udtVars = (args.udtVariables ?? []).map((uv) => ({
+          id: uv.id,
+          deviceId: uv.deviceId,
+          tag: uv.tag,
+          templateName: uv.templateName,
+          memberTags: uv.memberTags as Record<string, string>,
+          memberCipTypes: uv.memberCipTypes as Record<string, string> | undefined,
+          memberDeadbands: uv.memberDeadbands as Record<string, DeadBandConfig> | undefined,
+        }));
+
+        return await importGatewayBrowse(args.gatewayId, atomicVars, templates, udtVars);
+      },
+    }),
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // UDT Tag Config — update template defaults + instance overrides
+    // ═══════════════════════════════════════════════════════════════════════
+
+    updateGatewayUdtConfig: t.field({
+      type: GatewayConfigRef,
+      description: "Update UDT template member defaults and/or instance-level member deadband overrides.",
+      args: {
+        gatewayId: t.arg.string({ required: true }),
+        templateName: t.arg.string({ required: true }),
+        memberUpdates: t.arg({ type: "JSON", required: false }),
+        instanceUpdates: t.arg({ type: "JSON", required: false }),
+      },
+      resolve: async (_root, args) => {
+        return await updateGatewayUdtConfig(
+          args.gatewayId,
+          args.templateName,
+          args.memberUpdates as { name: string; defaultDeadband?: DeadBandConfig }[] | undefined,
+          args.instanceUpdates as { id: string; memberDeadbands: Record<string, DeadBandConfig> }[] | undefined,
+        );
+      },
+    }),
+
     // ═══════════════════════════════════════════════════════════════════════
     // Gateway Device Browse
     // ═══════════════════════════════════════════════════════════════════════
@@ -361,7 +543,7 @@ builder.mutationType({
       },
       resolve: async (_root, args) => {
         const i = args.input;
-        return await browseGatewayDevice({
+        const result = await browseGatewayDevice({
           deviceId: i.deviceId,
           protocol: i.protocol,
           host: i.host ?? undefined,
@@ -371,6 +553,32 @@ builder.mutationType({
           community: i.community ?? undefined,
           rootOid: i.rootOid ?? undefined,
           browseId: i.browseId ?? undefined,
+        });
+        // Cache successful browse results
+        if (result.items.length > 0) {
+          cacheBrowseResult(i.deviceId, { ...result, cachedAt: Date.now() }).catch(() => {});
+        }
+        return result;
+      },
+    }),
+
+    startGatewayBrowse: t.field({
+      type: StartBrowseResultRef,
+      description: "Start a non-blocking browse of a gateway device. Returns immediately with browseId. Use gatewayBrowseStates query or gatewayBrowseProgress subscription to track progress.",
+      args: {
+        input: t.arg({ type: GatewayBrowseInputRef, required: true }),
+      },
+      resolve: async (_root, args) => {
+        const i = args.input;
+        return await startGatewayBrowse({
+          deviceId: i.deviceId,
+          protocol: i.protocol,
+          host: i.host ?? undefined,
+          port: i.port ?? undefined,
+          endpointUrl: i.endpointUrl ?? undefined,
+          version: i.version ?? undefined,
+          community: i.community ?? undefined,
+          rootOid: i.rootOid ?? undefined,
         });
       },
     }),

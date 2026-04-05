@@ -49,6 +49,7 @@ const DeadBandConfigType = builder.objectRef<DeadBandConfig>(
 builder.objectType(DeadBandConfigType, {
   fields: (t) => ({
     value: t.exposeFloat("value"),
+    minTime: t.exposeInt("minTime", { nullable: true }),
     maxTime: t.exposeInt("maxTime", { nullable: true }),
   }),
 });
@@ -597,9 +598,33 @@ builder.objectType(GatewayDeviceRef, {
       type: "JSON",
       description: "Protocol-specific connection config",
       resolve: (d) => {
-        const { _deviceId: _, protocol: __, ...rest } = d as Record<string, unknown>;
+        const { _deviceId: _, protocol: __, scanRate: _sr, deadband: _db, disableRBE: _rbe, templateNameOverrides: _tno, ...rest } = d as Record<string, unknown>;
         return rest;
       },
+    }),
+    scanRate: t.field({
+      type: "Int",
+      nullable: true,
+      description: "Polling interval in ms",
+      resolve: (d) => (d as any).scanRate ?? null,
+    }),
+    deadband: t.field({
+      type: DeadBandConfigType,
+      nullable: true,
+      description: "Default deadband (RBE) config for all variables on this device",
+      resolve: (d) => (d as any).deadband ?? null,
+    }),
+    disableRBE: t.field({
+      type: "Boolean",
+      nullable: true,
+      description: "Disable RBE for all variables on this device",
+      resolve: (d) => (d as any).disableRBE ?? null,
+    }),
+    templateNameOverrides: t.field({
+      type: "JSON",
+      nullable: true,
+      description: "Map of original browse template name → overridden unique name",
+      resolve: (d) => (d as any).templateNameOverrides ?? null,
     }),
   }),
 });
@@ -626,6 +651,50 @@ builder.objectType(GatewayVariableRef, {
   }),
 });
 
+// UDT output types for GatewayConfig
+type GatewayUdtTemplateMemberShape = { name: string; datatype: string; templateRef?: string; defaultDeadband?: DeadBandConfig | null };
+type GatewayUdtTemplateShape = { name: string; version?: string; members: GatewayUdtTemplateMemberShape[] };
+type GatewayUdtVariableShape = { id: string; deviceId: string; tag: string; templateName: string; memberTags: Record<string, string>; memberCipTypes?: Record<string, string>; memberDeadbands?: Record<string, DeadBandConfig> | null };
+
+const GatewayUdtTemplateMemberOutputRef = builder.objectRef<GatewayUdtTemplateMemberShape>("GatewayUdtTemplateMemberOutput");
+builder.objectType(GatewayUdtTemplateMemberOutputRef, {
+  fields: (t) => ({
+    name: t.exposeString("name"),
+    datatype: t.exposeString("datatype"),
+    templateRef: t.exposeString("templateRef", { nullable: true }),
+    defaultDeadband: t.field({
+      type: DeadBandConfigType,
+      nullable: true,
+      resolve: (m) => m.defaultDeadband ?? null,
+    }),
+  }),
+});
+
+const GatewayUdtTemplateOutputRef = builder.objectRef<GatewayUdtTemplateShape>("GatewayUdtTemplateOutput");
+builder.objectType(GatewayUdtTemplateOutputRef, {
+  fields: (t) => ({
+    name: t.exposeString("name"),
+    version: t.exposeString("version", { nullable: true }),
+    members: t.field({
+      type: [GatewayUdtTemplateMemberOutputRef],
+      resolve: (tmpl) => tmpl.members,
+    }),
+  }),
+});
+
+const GatewayUdtVariableOutputRef = builder.objectRef<GatewayUdtVariableShape>("GatewayUdtVariableOutput");
+builder.objectType(GatewayUdtVariableOutputRef, {
+  fields: (t) => ({
+    id: t.exposeString("id"),
+    deviceId: t.exposeString("deviceId"),
+    tag: t.exposeString("tag"),
+    templateName: t.exposeString("templateName"),
+    memberTags: t.field({ type: "JSON", resolve: (v) => v.memberTags }),
+    memberCipTypes: t.field({ type: "JSON", nullable: true, resolve: (v) => v.memberCipTypes ?? null }),
+    memberDeadbands: t.field({ type: "JSON", nullable: true, resolve: (v) => v.memberDeadbands ?? null }),
+  }),
+});
+
 const GatewayConfigRef = builder.objectRef<GatewayConfigKV>("GatewayConfig");
 builder.objectType(GatewayConfigRef, {
   fields: (t) => ({
@@ -641,6 +710,14 @@ builder.objectType(GatewayConfigRef, {
     variables: t.field({
       type: [GatewayVariableRef],
       resolve: (c) => Object.values(c.variables),
+    }),
+    udtTemplates: t.field({
+      type: [GatewayUdtTemplateOutputRef],
+      resolve: (c) => Object.values((c as any).udtTemplates ?? {}),
+    }),
+    udtVariables: t.field({
+      type: [GatewayUdtVariableOutputRef],
+      resolve: (c) => Object.values((c as any).udtVariables ?? {}),
     }),
     updatedAt: t.field({
       type: "DateTime",
@@ -671,6 +748,9 @@ const GatewayDeviceInputRef = builder.inputType("GatewayDeviceInput", {
     version: t.string({ required: false }),
     community: t.string({ required: false }),
     unitId: t.int({ required: false }),
+    scanRate: t.int({ required: false }),
+    deadband: t.field({ type: DeadBandConfigInputRef, required: false }),
+    disableRBE: t.boolean({ required: false }),
   }),
 });
 
@@ -690,6 +770,7 @@ const GatewayVariableInputRef = builder.inputType("GatewayVariableInput", {
     default: t.field({ type: "JSON", required: false }),
     deviceId: t.string({ required: true }),
     tag: t.string({ required: true }),
+    cipType: t.string({ required: false }),
     bidirectional: t.boolean({ required: false }),
     deadband: t.field({ type: DeadBandConfigInputRef, required: false }),
     disableRBE: t.boolean({ required: false }),
@@ -704,7 +785,7 @@ const GatewayVariableInputRef = builder.inputType("GatewayVariableInput", {
 // Gateway Browse Types
 // ═══════════════════════════════════════════════════════════════════════════
 
-import type { GatewayBrowseItem, GatewayBrowseResult } from "../nats/client.ts";
+import type { GatewayBrowseItem, GatewayBrowseResult, GatewayBrowseUdt, GatewayBrowseUdtMember } from "../nats/client.ts";
 
 const GatewayBrowseItemRef = builder.objectRef<GatewayBrowseItem>("GatewayBrowseItem");
 builder.objectType(GatewayBrowseItemRef, {
@@ -721,7 +802,29 @@ builder.objectType(GatewayBrowseItemRef, {
   }),
 });
 
-const GatewayBrowseResultRef = builder.objectRef<GatewayBrowseResult>("GatewayBrowseResult");
+const GatewayBrowseUdtMemberRef = builder.objectRef<GatewayBrowseUdtMember>("GatewayBrowseUdtMember");
+builder.objectType(GatewayBrowseUdtMemberRef, {
+  fields: (t) => ({
+    name: t.exposeString("name"),
+    datatype: t.exposeString("datatype"),
+    cipType: t.exposeString("cipType"),
+    udtType: t.exposeString("udtType"),
+    isArray: t.exposeBoolean("isArray"),
+  }),
+});
+
+const GatewayBrowseUdtRef = builder.objectRef<GatewayBrowseUdt>("GatewayBrowseUdt");
+builder.objectType(GatewayBrowseUdtRef, {
+  fields: (t) => ({
+    name: t.exposeString("name"),
+    members: t.field({
+      type: [GatewayBrowseUdtMemberRef],
+      resolve: (udt) => udt.members,
+    }),
+  }),
+});
+
+const GatewayBrowseResultRef = builder.objectRef<GatewayBrowseResult & { cachedAt?: number }>("GatewayBrowseResult");
 builder.objectType(GatewayBrowseResultRef, {
   fields: (t) => ({
     deviceId: t.exposeString("deviceId"),
@@ -729,6 +832,20 @@ builder.objectType(GatewayBrowseResultRef, {
     items: t.field({
       type: [GatewayBrowseItemRef],
       resolve: (r) => r.items,
+    }),
+    udts: t.field({
+      type: [GatewayBrowseUdtRef],
+      resolve: (r) => r.udts,
+    }),
+    structTags: t.field({
+      type: "JSON",
+      resolve: (r) => r.structTags,
+    }),
+    cachedAt: t.field({
+      type: "DateTime",
+      nullable: true,
+      description: "When this result was cached (null if fresh browse)",
+      resolve: (r) => r.cachedAt ? new Date(r.cachedAt) : null,
     }),
   }),
 });
@@ -747,12 +864,46 @@ const GatewayBrowseInputRef = builder.inputType("GatewayBrowseInput", {
   }),
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Gateway Import Input Types (type-centric import)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const GatewayUdtTemplateMemberInputRef = builder.inputType("GatewayUdtTemplateMemberInput", {
+  fields: (t) => ({
+    name: t.string({ required: true }),
+    datatype: t.string({ required: true }),
+    templateRef: t.string({ required: false }),
+    defaultDeadband: t.field({ type: DeadBandConfigInputRef, required: false }),
+  }),
+});
+
+const GatewayUdtTemplateInputRef = builder.inputType("GatewayUdtTemplateInput", {
+  fields: (t) => ({
+    name: t.string({ required: true }),
+    version: t.string({ required: false }),
+    members: t.field({ type: [GatewayUdtTemplateMemberInputRef], required: true }),
+  }),
+});
+
+const GatewayUdtVariableInputRef = builder.inputType("GatewayUdtVariableInput", {
+  fields: (t) => ({
+    id: t.string({ required: true }),
+    deviceId: t.string({ required: true }),
+    tag: t.string({ required: true }),
+    templateName: t.string({ required: true }),
+    memberTags: t.field({ type: "JSON", required: true }),
+    memberCipTypes: t.field({ type: "JSON", required: false }),
+    memberDeadbands: t.field({ type: "JSON", required: false }),
+  }),
+});
+
 // Gateway browse progress — normalized from protocol-specific formats
 type GatewayBrowseProgressShape = {
   browseId: string;
   deviceId: string;
   phase: string;
   discoveredCount: number;
+  totalCount: number;
   message: string;
   timestamp: number;
 };
@@ -764,6 +915,7 @@ builder.objectType(GatewayBrowseProgressRef, {
     deviceId: t.exposeString("deviceId"),
     phase: t.exposeString("phase"),
     discoveredCount: t.exposeInt("discoveredCount"),
+    totalCount: t.exposeInt("totalCount"),
     message: t.exposeString("message"),
     timestamp: t.field({
       type: "DateTime",
@@ -772,11 +924,73 @@ builder.objectType(GatewayBrowseProgressRef, {
   }),
 });
 
+// Gateway browse state — singleton persistent state per device
+import type { GatewayBrowseState } from "../modules/gateway.ts";
+
+const GatewayBrowseStateRef = builder.objectRef<GatewayBrowseState>("GatewayBrowseState");
+builder.objectType(GatewayBrowseStateRef, {
+  fields: (t) => ({
+    deviceId: t.exposeString("deviceId"),
+    browseId: t.exposeString("browseId"),
+    protocol: t.exposeString("protocol"),
+    status: t.exposeString("status"),
+    phase: t.exposeString("phase"),
+    discoveredCount: t.exposeInt("discoveredCount"),
+    totalCount: t.exposeInt("totalCount"),
+    message: t.exposeString("message"),
+    startedAt: t.field({
+      type: "DateTime",
+      resolve: (s) => new Date(s.startedAt),
+    }),
+    updatedAt: t.field({
+      type: "DateTime",
+      resolve: (s) => new Date(s.updatedAt),
+    }),
+    error: t.exposeString("error", { nullable: true }),
+  }),
+});
+
+// Result from startGatewayBrowse mutation (non-blocking)
+type StartBrowseResultShape = { browseId: string; deviceId: string };
+
+const StartBrowseResultRef = builder.objectRef<StartBrowseResultShape>("StartBrowseResult");
+builder.objectType(StartBrowseResultRef, {
+  fields: (t) => ({
+    browseId: t.exposeString("browseId"),
+    deviceId: t.exposeString("deviceId"),
+  }),
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Orchestrator Types
 // ═══════════════════════════════════════════════════════════════════════════
 
-import type { DesiredServiceKV, ServiceStatusKV } from "@tentacle/nats-schema";
+import type { DesiredServiceKV, ServiceStatusKV, ModuleRegistryInfo, ModuleVersionInfo } from "@tentacle/nats-schema";
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Module Registry & Version Types
+// ═══════════════════════════════════════════════════════════════════════════
+
+const ModuleRegistryInfoRef = builder.objectRef<ModuleRegistryInfo>("ModuleRegistryInfo");
+builder.objectType(ModuleRegistryInfoRef, {
+  fields: (t) => ({
+    moduleId: t.exposeString("moduleId"),
+    repo: t.exposeString("repo"),
+    description: t.exposeString("description"),
+    category: t.exposeString("category"),
+    runtime: t.exposeString("runtime"),
+  }),
+});
+
+const ModuleVersionInfoRef = builder.objectRef<ModuleVersionInfo>("ModuleVersionInfo");
+builder.objectType(ModuleVersionInfoRef, {
+  fields: (t) => ({
+    moduleId: t.exposeString("moduleId"),
+    installedVersions: t.exposeStringList("installedVersions"),
+    latestVersion: t.exposeString("latestVersion", { nullable: true }),
+    activeVersion: t.exposeString("activeVersion", { nullable: true }),
+  }),
+});
 
 const DesiredServiceRef = builder.objectRef<DesiredServiceKV>("DesiredService");
 builder.objectType(DesiredServiceRef, {
@@ -811,6 +1025,8 @@ builder.objectType(ServiceStatusRef, {
 });
 
 export {
+  ModuleRegistryInfoRef,
+  ModuleVersionInfoRef,
   DesiredServiceRef,
   ServiceStatusRef,
   ConfigEntryRef,
@@ -834,4 +1050,8 @@ export {
   GatewayBrowseResultRef,
   GatewayBrowseInputRef,
   GatewayBrowseProgressRef,
+  GatewayBrowseStateRef,
+  StartBrowseResultRef,
+  GatewayUdtTemplateInputRef,
+  GatewayUdtVariableInputRef,
 };
